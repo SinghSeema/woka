@@ -69,7 +69,7 @@ docker run -d \
     --network host \
     livekit/livekit-server \
     --dev
-```bash
+```
 
 ### 4. Start Backend
 
