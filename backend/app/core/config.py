@@ -1,16 +1,20 @@
 """Configuration management using Pydantic Settings."""
 
 import os
+from pathlib import Path
 from typing import List, Optional
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Find .env file in project root (two levels up from this file)
+_env_file = Path(__file__).parent.parent.parent / ".env"
 
 
 class Settings(BaseSettings):
     """Application settings with environment variable support."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(_env_file) if _env_file.exists() else None,
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
