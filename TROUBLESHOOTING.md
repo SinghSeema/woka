@@ -71,8 +71,8 @@
    - `LIVEKIT_API_KEY`
    - `LIVEKIT_API_SECRET`
    - `GROQ_API_KEY`
-   - `DEEPGRAM_API_KEY`
-   - `CARTESIA_API_KEY`
+   - `DEEPGRAM_API_KEY` (for both STT and TTS)
+   - `DEEPGRAM_TTS_VOICE` (optional, defaults to `aura-2-helena-en`)
 
 2. Verify `.env` file is in project root (not in backend/)
 

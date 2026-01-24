@@ -55,11 +55,10 @@ class Settings(BaseSettings):
 
     # External Services
     GROQ_API_KEY: str = Field(..., description="Groq API key for LLM")
-    DEEPGRAM_API_KEY: str = Field(..., description="Deepgram API key for STT")
-    CARTESIA_API_KEY: str = Field(..., description="Cartesia API key for TTS")
-    CARTESIA_VOICE_ID: str = Field(
-        default="faf0731e-dfb9-4cfc-8119-259a79b27e12",
-        description="Cartesia voice ID"
+    DEEPGRAM_API_KEY: str = Field(..., description="Deepgram API key for STT and TTS")
+    DEEPGRAM_TTS_VOICE: str = Field(
+        default="aura-2-helena-en",
+        description="Deepgram TTS voice (Aura model)"
     )
 
     # LLM Configuration
@@ -69,6 +68,11 @@ class Settings(BaseSettings):
     BOT_NAME: str = Field(default="Woka", description="Bot display name")
     VAD_THRESHOLD: float = Field(default=0.5, description="Voice Activity Detection threshold")
     NUM_IDLE_PROCESSES: int = Field(default=3, description="Number of pre-warmed bot processes")
+
+    # Session History (Supabase)
+    SUPABASE_URL: Optional[str] = Field(default=None, description="Supabase project URL")
+    SUPABASE_KEY: Optional[str] = Field(default=None, description="Supabase API key")
+    SUPABASE_ENABLED: bool = Field(default=False, description="Enable Supabase for session history")
 
     # Security
     RATE_LIMIT_ENABLED: bool = Field(default=True, description="Enable rate limiting")

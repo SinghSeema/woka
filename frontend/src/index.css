@@ -13,3 +13,32 @@
   /* Add custom component styles here if needed */
 }
 
+/* Custom animations for Woka avatar */
+@keyframes float {
+  0%, 100% {
+    transform: translateY(0px) translateX(0px);
+    opacity: 0.4;
+  }
+  50% {
+    transform: translateY(-20px) translateX(10px);
+    opacity: 0.8;
+  }
+}
+
+.animate-float {
+  animation: float 3s ease-in-out infinite;
+}
+
+/* Enhanced participant tile styles */
+.lk-participant-tile {
+  border-radius: 1rem;
+  overflow: hidden;
+}
+
+/* Smooth transitions */
+* {
+  transition-property: transform, opacity, background-color, border-color;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 300ms;
+}
+
