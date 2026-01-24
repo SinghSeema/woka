@@ -71,7 +71,11 @@ sleep 2
 echo -e "${BLUE}Starting Bot Worker...${NC}"
 cd backend
 source ../.pipebot/bin/activate
-python -m bot.main &
+# Load environment variables from .env file (handle spaces around =)
+set -a
+source <(grep -v '^#' ../.env | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*=[[:space:]]*/=/' | sed 's/[[:space:]]*$//')
+set +a
+python -m bot.main dev &
 BOT_PID=$!
 cd ..
 
