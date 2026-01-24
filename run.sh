@@ -61,9 +61,20 @@ trap cleanup SIGINT SIGTERM
 echo -e "${BLUE}Starting Backend API on http://localhost:8000${NC}"
 cd backend
 source ../.pipebot/bin/activate
-# Load environment variables for backend
+# Load environment variables for backend (handle spaces and comments)
 set -a
-source <(grep -v '^#' ../.env | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*=[[:space:]]*/=/' | sed 's/[[:space:]]*$//' 2>/dev/null || cat ../.env | grep -v '^#' | sed 's/^ *//' | sed 's/ *= */=/' | sed 's/ *$//')
+while IFS= read -r line; do
+    # Skip empty lines and comments
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    # Remove leading/trailing spaces, handle spaces around =
+    line=$(echo "$line" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//' | sed 's/[[:space:]]*=[[:space:]]*/=/')
+    # Remove inline comments
+    line=$(echo "$line" | sed 's/#.*$//' | sed 's/[[:space:]]*$//')
+    # Export if it looks like KEY=VALUE
+    if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+        export "$line" 2>/dev/null || true
+    fi
+done < ../.env
 set +a
 # Run uvicorn from backend directory
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload > ../backend.log 2>&1 &
@@ -73,6 +84,7 @@ sleep 3
 # Verify backend started
 if ! kill -0 $BACKEND_PID 2>/dev/null; then
     echo -e "${YELLOW}Warning: Backend may have failed to start. Check backend.log${NC}"
+    cat backend.log 2>/dev/null | tail -10
 fi
 
 sleep 2
@@ -81,9 +93,20 @@ sleep 2
 echo -e "${BLUE}Starting Bot Worker...${NC}"
 cd backend
 source ../.pipebot/bin/activate
-# Load environment variables from .env file (handle spaces around =)
+# Load environment variables from .env file (handle spaces and comments)
 set -a
-source <(grep -v '^#' ../.env | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*=[[:space:]]*/=/' | sed 's/[[:space:]]*$//')
+while IFS= read -r line; do
+    # Skip empty lines and comments
+    [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+    # Remove leading/trailing spaces, handle spaces around =
+    line=$(echo "$line" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//' | sed 's/[[:space:]]*=[[:space:]]*/=/')
+    # Remove inline comments
+    line=$(echo "$line" | sed 's/#.*$//' | sed 's/[[:space:]]*$//')
+    # Export if it looks like KEY=VALUE
+    if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+        export "$line" 2>/dev/null || true
+    fi
+done < ../.env
 set +a
 python -m bot.main dev &
 BOT_PID=$!
