@@ -6,8 +6,18 @@ from typing import List, Optional
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Find .env file in project root (two levels up from this file)
-_env_file = Path(__file__).parent.parent.parent / ".env"
+# Find .env file in project root
+# This file is at: backend/app/core/config.py
+# .env is at: project_root/.env
+# So we go up 3 levels from this file
+_env_file = Path(__file__).resolve().parent.parent.parent.parent / ".env"
+
+# Also check if .env exists in current working directory (for flexibility)
+if not _env_file.exists():
+    _env_file = Path.cwd() / ".env"
+    # If still not found, try going up from cwd
+    if not _env_file.exists():
+        _env_file = Path.cwd().parent / ".env"
 
 
 class Settings(BaseSettings):
