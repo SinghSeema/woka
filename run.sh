@@ -61,9 +61,19 @@ trap cleanup SIGINT SIGTERM
 echo -e "${BLUE}Starting Backend API on http://localhost:8000${NC}"
 cd backend
 source ../.pipebot/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload &
+# Load environment variables for backend
+set -a
+source <(grep -v '^#' ../.env | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*=[[:space:]]*/=/' | sed 's/[[:space:]]*$//' 2>/dev/null || cat ../.env | grep -v '^#' | sed 's/^ *//' | sed 's/ *= */=/' | sed 's/ *$//')
+set +a
+# Run uvicorn from backend directory
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload > ../backend.log 2>&1 &
 BACKEND_PID=$!
 cd ..
+sleep 3
+# Verify backend started
+if ! kill -0 $BACKEND_PID 2>/dev/null; then
+    echo -e "${YELLOW}Warning: Backend may have failed to start. Check backend.log${NC}"
+fi
 
 sleep 2
 
