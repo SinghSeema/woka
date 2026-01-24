@@ -1,6 +1,6 @@
 # Woka Wellness Voice AI Assistant
 
-A production-ready voice AI wellness coaching application that provides personalized guidance through real-time voice interactions.
+A voice AI wellness coaching application that provides personalized guidance through real-time voice interactions.
 
 ## 🌿 Features
 
