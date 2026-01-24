@@ -63,6 +63,12 @@ docker run -d \
   -e LIVEKIT_KEYS="devkey: secret" \
   livekit/livekit-server:latest
 ```
+or try this if server is not reachable
+    sudo docker run --rm \
+    --network host \
+    livekit/livekit-server \
+    --dev
+
 
 ### 4. Start Backend
 
