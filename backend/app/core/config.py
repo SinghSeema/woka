@@ -74,6 +74,60 @@ class Settings(BaseSettings):
     SUPABASE_KEY: Optional[str] = Field(default=None, description="Supabase API key")
     SUPABASE_ENABLED: bool = Field(default=False, description="Enable Supabase for session history")
 
+    # Context Management
+    MAX_PAST_SESSIONS: int = Field(
+        default=2, description="Maximum past sessions to include in context"
+    )
+    MAX_PAST_CONTEXT_SIZE: int = Field(
+        default=8000, description="Maximum past context size in characters"
+    )
+    MAX_SUMMARY_LENGTH: int = Field(
+        default=400, description="Maximum summary length per session in characters"
+    )
+    SYSTEM_PROMPT_MAX_SIZE: int = Field(
+        default=2000, description="Maximum system prompt size in characters (warning threshold)"
+    )
+    SYSTEM_PROMPT_ERROR_SIZE: int = Field(
+        default=3000, description="Maximum system prompt size in characters (error threshold)"
+    )
+    CONTEXT_WARNING_THRESHOLD: float = Field(
+        default=0.8, description="Warning threshold as fraction of model context window (0.8 = 80%)"
+    )
+    
+    # Dynamic Context Management
+    ENABLE_DYNAMIC_CONTEXT: bool = Field(
+        default=True, description="Enable runtime context querying"
+    )
+    INITIAL_SESSIONS_COUNT: int = Field(
+        default=2, description="Number of sessions to load at startup"
+    )
+    MAX_DYNAMIC_SESSIONS: int = Field(
+        default=2, description="Max sessions to retrieve dynamically"
+    )
+    CONTEXT_CACHE_TTL: int = Field(
+        default=300, description="Context cache TTL in seconds"
+    )
+    INTENT_DETECTION_ENABLED: bool = Field(
+        default=True, description="Enable intent detection"
+    )
+    
+    # Semantic Search Configuration
+    ENABLE_SEMANTIC_SEARCH: bool = Field(
+        default=True, description="Enable semantic search with embeddings"
+    )
+    EMBEDDING_MODEL: str = Field(
+        default="text-embedding-3-small", description="Embedding model name"
+    )
+    SEMANTIC_SEARCH_THRESHOLD: float = Field(
+        default=0.7, description="Minimum similarity threshold for semantic search"
+    )
+    EMBEDDING_DIMENSION: int = Field(
+        default=384, description="Embedding vector dimension (384 for local models, 1536 for OpenAI)"
+    )
+    OPENAI_API_KEY: Optional[str] = Field(
+        default=None, description="OpenAI API key for embeddings (optional, falls back to local model)"
+    )
+
     # Security
     RATE_LIMIT_ENABLED: bool = Field(default=True, description="Enable rate limiting")
     RATE_LIMIT_REQUESTS: int = Field(default=100, description="Rate limit requests per minute")

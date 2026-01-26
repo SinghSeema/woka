@@ -188,6 +188,15 @@ function ParticipantAvatar({
   isBot = false, 
   isActive = false 
 }) {
+  // Log isBot and isActive props
+  React.useEffect(() => {
+    console.log('[ParticipantAvatar] Props:', {
+      name,
+      isBot,
+      isActive
+    });
+  }, [name, isBot, isActive]);
+  
   // Get initials for user
   const initials = isBot ? "W" : name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
   
@@ -201,7 +210,11 @@ function ParticipantAvatar({
           }`}
         />
       ) : (
-        <div className="absolute inset-0 bg-gradient-to-br from-blue-600 via-indigo-600 to-purple-600" />
+        <div
+          className={`absolute inset-0 bg-gradient-to-br from-blue-600 via-indigo-600 to-purple-600 ${
+            isActive ? "animate-pulse" : ""
+          }`}
+        />
       )}
       
       {/* Avatar Logo Circle */}
@@ -236,14 +249,14 @@ function ParticipantAvatar({
       {/* Speaking indicator with glow */}
       {isActive && (
         <>
-          <div className={`absolute top-4 right-4 w-4 h-4 rounded-full animate-pulse ring-4 ${
-            isBot ? "bg-green-400 ring-green-400/50" : "bg-blue-400 ring-blue-400/50"
+          <div className={`absolute top-4 right-4 w-5 h-5 rounded-full animate-pulse ring-4 z-30 ${
+            isBot ? "bg-green-400 ring-green-400/60" : "bg-blue-400 ring-blue-400/60"
           }`} />
           {/* Light focus glow effect when speaking */}
-          <div className={`absolute inset-0 rounded-lg ${
+          <div className={`absolute inset-0 rounded-lg z-10 ${
             isBot 
-              ? "bg-gradient-to-br from-green-400/20 via-emerald-400/15 to-teal-400/20 shadow-[0_0_40px_rgba(34,197,94,0.4)]" 
-              : "bg-gradient-to-br from-blue-400/20 via-indigo-400/15 to-purple-400/20 shadow-[0_0_40px_rgba(59,130,246,0.4)]"
+              ? "bg-gradient-to-br from-green-400/30 via-emerald-400/25 to-teal-400/30 shadow-[0_0_50px_rgba(34,197,94,0.6)]" 
+              : "bg-gradient-to-br from-blue-400/30 via-indigo-400/25 to-purple-400/30 shadow-[0_0_50px_rgba(59,130,246,0.6)]"
           } pointer-events-none animate-pulse`} />
         </>
       )}
@@ -273,10 +286,30 @@ function Stage() {
   // State to track speaking - monitor both participant.isSpeaking and track state
   const [botSpeaking, setBotSpeaking] = React.useState(false);
   const [userSpeaking, setUserSpeaking] = React.useState(false);
+  
+  // Use ref to track previous botSpeaking value for logging
+  const prevBotSpeakingRef = React.useRef(false);
+  
+  // Log botSpeaking state changes
+  React.useEffect(() => {
+    console.log('[Stage] botSpeaking state:', botSpeaking);
+  }, [botSpeaking]);
 
   // Monitor speaking state for bot participant - use multiple detection methods
   React.useEffect(() => {
+    console.log('[Bot Detection] Checking bot participant:', {
+      botParticipant: botParticipant ? {
+        identity: botParticipant.identity,
+        name: botParticipant.name,
+        isSpeaking: botParticipant.isSpeaking,
+        audioTracksCount: botParticipant.audioTracks?.size || 0
+      } : null,
+      allParticipants: participants.map(p => ({ identity: p.identity, name: p.name })),
+      BOT_NAME
+    });
+    
     if (!botParticipant) {
+      console.warn('[Bot Detection] Bot participant not found! Looking for identity:', BOT_NAME);
       setBotSpeaking(false);
       return;
     }
@@ -321,6 +354,18 @@ function Stage() {
       const speaking = isSpeaking || hasActiveAudio;
       
       if (mounted) {
+        // Log bot speaking state changes
+        if (speaking !== prevBotSpeakingRef.current) {
+          console.log('[Bot Speaking] State changed:', {
+            botSpeaking: speaking,
+            previous: prevBotSpeakingRef.current,
+            isSpeaking,
+            hasActiveAudio,
+            botParticipant: botParticipant?.identity,
+            audioTracksCount: botParticipant?.audioTracks?.size || 0
+          });
+          prevBotSpeakingRef.current = speaking;
+        }
         setBotSpeaking(speaking);
       }
     };

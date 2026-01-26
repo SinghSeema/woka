@@ -186,6 +186,8 @@ See `.env.example` for all available configuration options.
 - [Product Requirements Document (PRD)](docs/PRD.md)
 - [High-Level Design (HLD)](docs/HLD.md)
 - [Low-Level Design (LLD)](docs/LLD.md)
+- [Context Management Rules](docs/CONTEXT_MANAGEMENT.md) - **Important**: Rules for managing LLM input context
+- [Agentic Memory Guide](docs/AGENTIC_MEMORY.md)
 - [API Documentation](docs/API.md)
 - [Deployment Guide](docs/DEPLOYMENT.md)
 

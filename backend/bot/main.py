@@ -26,6 +26,12 @@ from bot.services.stt_service import create_stt_service
 from bot.services.tts_service import create_tts_service
 from bot.services.transcript_storage import TranscriptStorage
 from bot.services.database_service import get_past_sessions
+from bot.services.context_manager import (
+    build_past_context,
+    validate_context_size,
+    estimate_tokens
+)
+from bot.services.context_cache import ContextCache
 
 # Setup logging
 setup_logging()
@@ -81,15 +87,22 @@ async def entrypoint(ctx: JobContext):
         transcript_storage.set_session_id(ctx.room.name)
         logger.info(f"Initialized transcript storage for session: {ctx.room.name}")
 
+        # Initialize context cache for dynamic queries
+        context_cache = None
+        if settings.ENABLE_DYNAMIC_CONTEXT:
+            context_cache = ContextCache(ttl_seconds=settings.CONTEXT_CACHE_TTL)
+            logger.info(f"✅ Initialized context cache (TTL: {settings.CONTEXT_CACHE_TTL}s)")
+        
         # Fetch past sessions for agentic memory
         past_sessions = []
         if settings.SUPABASE_ENABLED:
             logger.info("=" * 60)
             logger.info(f"📚 Fetching past session summaries for agentic memory")
             logger.info(f"   User: {user_name}")
-            logger.info(f"   Limit: 10 most recent sessions")
+            initial_count = settings.INITIAL_SESSIONS_COUNT if settings.ENABLE_DYNAMIC_CONTEXT else settings.MAX_PAST_SESSIONS
+            logger.info(f"   Limit: {initial_count} most recent sessions")
             try:
-                past_sessions = await get_past_sessions(user_name, limit=10)
+                past_sessions = await get_past_sessions(user_name, limit=initial_count)
                 logger.info(f"✅ Retrieved {len(past_sessions)} past sessions for {user_name}")
                 if past_sessions:
                     logger.info(f"   Most recent session: {past_sessions[0].get('created_at', 'unknown')}")
@@ -112,14 +125,18 @@ async def entrypoint(ctx: JobContext):
             logger.info("⚠️  Supabase disabled - no past sessions will be loaded")
 
         # Generate bot token
+        # Use BOT_NAME as identity so frontend can find the bot participant
         token = (
             api.AccessToken(settings.LIVEKIT_API_KEY, settings.LIVEKIT_API_SECRET)
-            .with_identity(f"bot-{ctx.job.id}")
+            .with_identity(settings.BOT_NAME)
             .with_name(settings.BOT_NAME)
             .with_grants(api.VideoGrants(room_join=True, room=ctx.room.name))
         )
+        logger.info(f"Bot token generated with identity: {settings.BOT_NAME}, name: {settings.BOT_NAME}")
 
         # Create LiveKit transport
+        logger.info(f"Creating LiveKit transport for room: {ctx.room.name}")
+        logger.info(f"Bot identity: bot-{ctx.job.id}, Bot name: {settings.BOT_NAME}")
         transport = LiveKitTransport(
             url=settings.LIVEKIT_URL,
             token=token.to_jwt(),
@@ -132,75 +149,44 @@ async def entrypoint(ctx: JobContext):
                 vad_threshold=settings.VAD_THRESHOLD,
             ),
         )
+        logger.info(f"✅ LiveKit transport created with audio_out_enabled=True")
 
         # Setup services
         logger.info("Initializing services...")
-        stt = create_stt_service()
-        llm = create_llm_service()
-        tts = create_tts_service()
+        try:
+            stt = create_stt_service()
+            logger.info("✅ STT service created")
+        except Exception as e:
+            logger.error(f"❌ Error creating STT service: {e}", exc_info=True)
+            raise
+        
+        try:
+            llm = create_llm_service()
+            logger.info("✅ LLM service created")
+        except Exception as e:
+            logger.error(f"❌ Error creating LLM service: {e}", exc_info=True)
+            raise
+        
+        try:
+            tts = create_tts_service()
+            logger.info("✅ TTS service created")
+        except Exception as e:
+            logger.error(f"❌ Error creating TTS service: {e}", exc_info=True)
+            raise
 
         # Build system prompt with past session context (agentic memory)
-        past_context = ""
-        if past_sessions:
-            logger.info(f"📝 Building system prompt with {len(past_sessions)} past session summaries")
-            past_context = "\n\n## PAST SESSIONS CONTEXT (Agentic Memory)\n"
-            past_context += f"You have access to summaries from {len(past_sessions)} recent sessions with {user_name}. "
-            past_context += "This enables you to provide continuity, remember their journey, and answer questions about past conversations.\n\n"
-            past_context += "**Your capabilities with past sessions:**\n"
-            past_context += "1. **Remember & Reference**: You can remember goals, concerns, progress, and topics from past sessions\n"
-            past_context += "2. **Answer Questions**: When {user_name} asks about past sessions (e.g., 'What did we discuss last time?', 'What was my goal?'), you can reference the summaries below\n"
-            past_context += "3. **Provide Continuity**: Reference past conversations naturally when relevant to current topics\n"
-            past_context += "4. **Track Progress**: Acknowledge achievements, changes, or progress mentioned across sessions\n"
-            past_context += "5. **Share Context**: When asked, you can share specific information from past sessions (e.g., 'In our session on [date], we discussed...')\n\n"
-            past_context += "**Recent session summaries (most recent first):**\n\n"
-            
-            for i, session in enumerate(past_sessions[:10], 1):
-                summary = session.get("summary", "")
-                created_at = session.get("created_at", "")
-                duration = session.get("duration_seconds", 0)
-                message_count = session.get("message_count", 0)
-                
-                # Format date nicely
-                date_str = "recent"
-                date_display = "recently"
-                if created_at:
-                    try:
-                        from datetime import datetime
-                        dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
-                        date_str = dt.strftime("%Y-%m-%d")
-                        # Create a more readable date format
-                        date_display = dt.strftime("%B %d, %Y")  # e.g., "January 15, 2024"
-                    except:
-                        date_str = created_at[:10] if len(created_at) >= 10 else "recent"
-                        date_display = date_str
-                
-                # Format duration
-                duration_min = int(duration / 60) if duration else 0
-                
-                past_context += f"**Session {i}** - {date_display} ({date_str})\n"
-                past_context += f"Duration: {duration_min} minutes | Messages: {message_count}\n"
-                past_context += f"Summary: {summary}\n\n"
-            
-            past_context += "**Guidelines for using past context:**\n"
-            past_context += f"- **When {user_name} asks about past sessions**: Reference the specific session(s) and share relevant information\n"
-            past_context += "- **When topics connect**: Naturally reference past conversations (e.g., 'Last time we discussed your sleep schedule...')\n"
-            past_context += "- **When acknowledging progress**: Reference past sessions to show continuity (e.g., 'I remember you mentioned...')\n"
-            past_context += "- **Be specific**: When sharing from past sessions, mention the date or session number if helpful\n"
-            past_context += "- **Don't force it**: Only reference past sessions when it adds value or when the user asks\n"
-            past_context += "- **Be warm and personal**: Show you remember their journey and care about their progress\n"
-            past_context += "- **Multiple sessions**: You can reference and combine information from multiple past sessions when relevant. For example, if asked about progress over time, reference multiple sessions to show the journey\n"
-            past_context += f"- **User questions**: If {user_name} asks 'What did we talk about before?', 'What was my goal?', 'What progress have I made?', or 'What did we discuss about [topic]?', use the summaries above to provide specific, detailed answers\n"
-            past_context += "- **Cross-session patterns**: When you notice patterns or themes across multiple sessions, you can reference them (e.g., 'I've noticed across our sessions that you've been working on...')\n"
-            past_context += "- **Timeline awareness**: You can reference the timeline of sessions (e.g., 'In our earlier sessions, you mentioned... and more recently, you've been focusing on...')"
-            
+        # Use context manager to build and validate past context
+        past_context, sessions_included = build_past_context(past_sessions, user_name)
+        if past_context:
             logger.info(f"✅ Past session context prepared ({len(past_context)} characters)")
-            logger.info(f"   Includes {len(past_sessions)} session summaries with dates, durations, and full summaries")
+            logger.info(f"   Includes {sessions_included} session summaries with dates, durations, and summaries")
         else:
             logger.info("ℹ️  No past sessions available - bot will start fresh")
 
         # Initialize context with user's name
         logger.info("📋 Building system prompt for bot...")
-        system_prompt = f"""
+        # Build base system prompt template (without past_context)
+        base_system_prompt_template = f"""
         ## ROLE
         You are "{settings.BOT_NAME}," an empathetic, professional, and motivational Wellness Coach. Your goal is to help {user_name} achieve their health goals through lifestyle, habit formation, and positive mindset shifts.
 
@@ -218,24 +204,52 @@ async def entrypoint(ctx: JobContext):
         - **Tone:** Grounded, encouraging, and clear. 
         - **Style:** Keep responses concise (ideal for voice interaction). Avoid long lists.
         - **Greeting:** Start by warmly greeting {user_name} and acknowledging their progress.
-        {past_context}
+        {{past_context_placeholder}}
 
         ## INITIAL TASK
         Greet {user_name} and ask how their energy levels are today.
         """
+        # Calculate base prompt (without past_context) for validation
+        base_system_prompt = base_system_prompt_template.replace("{past_context_placeholder}", "")
+        base_prompt_size = len(base_system_prompt)
+        # Build full system prompt with past_context
+        system_prompt = base_system_prompt_template.replace("{past_context_placeholder}", past_context)
 
         messages = [{"role": "system", "content": system_prompt}]
         context = OpenAILLMContext(messages)
         context_aggregator = llm.create_context_aggregator(context)
         
-        # Log system prompt summary
+        # Validate and log context sizes
         prompt_length = len(system_prompt)
         has_past_context = len(past_context) > 0
-        logger.info(f"✅ System prompt created ({prompt_length} characters)")
+        
+        # Validate context size (model context window: 128K for llama-3.3-70b-versatile)
+        # Pass base prompt separately so validation checks base against its threshold, not total
+        is_valid, warning = validate_context_size(
+            system_prompt,
+            past_context,
+            model_context_window=128000,  # llama-3.3-70b-versatile context window
+            base_system_prompt=base_system_prompt
+        )
+        
+        if not is_valid:
+            logger.error(f"❌ Context validation failed: {warning}")
+            raise ValueError(f"Context size validation failed: {warning}")
+        
+        if warning:
+            logger.warning(f"⚠️  Context validation warning: {warning}")
+        
+        # Log system prompt summary
+        system_tokens = estimate_tokens(system_prompt)
+        past_tokens = estimate_tokens(past_context) if past_context else 0
+        total_tokens = system_tokens + past_tokens
+        
+        logger.info(f"✅ System prompt created ({prompt_length} characters, ~{system_tokens} tokens)")
         logger.info(f"   Includes past session context: {'Yes' if has_past_context else 'No'}")
         if has_past_context:
-            logger.info(f"   Past context size: {len(past_context)} characters")
-            logger.info(f"   Bot is ready with agentic memory from {len(past_sessions)} past sessions")
+            logger.info(f"   Past context size: {len(past_context)} characters (~{past_tokens} tokens)")
+            logger.info(f"   Bot is ready with agentic memory from {sessions_included} past sessions")
+        logger.info(f"   Total context: ~{total_tokens} tokens (system + past context, excluding conversation history)")
 
         # Build pipeline
         logger.info("Building pipeline...")
@@ -253,19 +267,31 @@ async def entrypoint(ctx: JobContext):
 
         task = PipelineTask(pipeline, params=PipelineParams(allow_interruptions=True))
 
-        # Setup event handlers with transcript storage
+        # Setup event handlers with transcript storage and context cache
         logger.info("Setting up event handlers (including session save on disconnect)...")
-        await setup_event_handlers(transport, task, transcript_storage, user_name, ctx.room.name, context)
+        await setup_event_handlers(
+            transport, task, transcript_storage, user_name, ctx.room.name, context, context_cache
+        )
         logger.info("✅ Event handlers configured - session will be saved on disconnect")
+        if context_cache:
+            logger.info(f"   Dynamic context querying enabled (cache TTL: {settings.CONTEXT_CACHE_TTL}s)")
 
         # Run pipeline
         logger.info("🚀 Starting pipeline runner - session is now active")
         logger.info(f"   User: {user_name}")
         logger.info(f"   Room: {ctx.room.name}")
+        logger.info(f"   Bot name: {settings.BOT_NAME}")
+        logger.info(f"   Bot identity: bot-{ctx.job.id}")
         logger.info(f"   Supabase enabled: {settings.SUPABASE_ENABLED}")
-        runner = PipelineRunner()
-        await runner.run(task)
-        logger.info("⏹️  Pipeline runner stopped")
+        logger.info(f"   Audio out enabled: True")
+        logger.info(f"   Audio in enabled: True")
+        try:
+            runner = PipelineRunner()
+            await runner.run(task)
+            logger.info("⏹️  Pipeline runner stopped")
+        except Exception as e:
+            logger.error(f"❌ Error in pipeline runner: {e}", exc_info=True)
+            raise
 
     except Exception as e:
         logger.error(f"Error in bot entrypoint: {e}", exc_info=True)
