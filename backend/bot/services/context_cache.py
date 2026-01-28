@@ -23,18 +23,28 @@ class CacheEntry:
     query_key: str = ""
 
 
+@dataclass
+class EmbeddingCacheEntry:
+    """Cache entry for embeddings."""
+    embedding: List[float]
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
 class ContextCache:
-    """In-memory cache for past session queries."""
+    """In-memory cache for past session queries and embeddings."""
     
-    def __init__(self, ttl_seconds: int = 300):
+    def __init__(self, ttl_seconds: int = 300, embedding_ttl_seconds: int = 3600):
         """Initialize cache.
         
         Args:
             ttl_seconds: Time-to-live for cache entries in seconds
+            embedding_ttl_seconds: Time-to-live for embedding cache entries in seconds
         """
         self._cache: Dict[str, Dict[str, CacheEntry]] = {}  # {user_name: {query_key: CacheEntry}}
+        self._embedding_cache: Dict[str, EmbeddingCacheEntry] = {}  # {text_hash: EmbeddingCacheEntry}
         self._ttl = timedelta(seconds=ttl_seconds)
-        logger.info(f"Initialized context cache with TTL: {ttl_seconds}s")
+        self._embedding_ttl = timedelta(seconds=embedding_ttl_seconds)
+        logger.info(f"Initialized context cache with TTL: {ttl_seconds}s, embedding TTL: {embedding_ttl_seconds}s")
     
     def get(
         self,
@@ -68,7 +78,7 @@ class ContextCache:
             del user_cache[query_key]
             return None
         
-        logger.debug(f"Cache hit for {user_name}: {query_key}")
+        # Cache hit - no log needed (too verbose)
         return entry.sessions
     
     def set(
@@ -145,6 +155,80 @@ class ContextCache:
         
         return removed
     
+    def get_embedding(
+        self,
+        text: str
+    ) -> Optional[List[float]]:
+        """Get cached embedding for text.
+        
+        Args:
+            text: Text to get embedding for
+            
+        Returns:
+            Cached embedding or None if not found/expired
+        """
+        import hashlib
+        text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+        
+        if text_hash not in self._embedding_cache:
+            return None
+        
+        entry = self._embedding_cache[text_hash]
+        
+        # Check if expired
+        if datetime.now() - entry.timestamp > self._embedding_ttl:
+            logger.debug(f"Embedding cache entry expired for text hash: {text_hash[:8]}")
+            del self._embedding_cache[text_hash]
+            return None
+        
+        # Embedding cache hit - no log needed (too verbose)
+        return entry.embedding.copy()
+    
+    def set_embedding(
+        self,
+        text: str,
+        embedding: List[float]
+    ) -> None:
+        """Cache embedding for text.
+        
+        Args:
+            text: Text that was embedded
+            embedding: Embedding vector to cache
+        """
+        import hashlib
+        text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+        
+        entry = EmbeddingCacheEntry(
+            embedding=embedding.copy(),
+            timestamp=datetime.now()
+        )
+        
+        self._embedding_cache[text_hash] = entry
+        # Embedding cached - no log needed (too verbose)
+    
+    def cleanup_expired_embeddings(self) -> int:
+        """Remove expired embedding entries from cache.
+        
+        Returns:
+            Number of entries removed
+        """
+        removed = 0
+        now = datetime.now()
+        
+        expired_hashes = [
+            text_hash for text_hash, entry in self._embedding_cache.items()
+            if now - entry.timestamp > self._embedding_ttl
+        ]
+        
+        for text_hash in expired_hashes:
+            del self._embedding_cache[text_hash]
+            removed += 1
+        
+        if removed > 0:
+            logger.debug(f"Cleaned up {removed} expired embedding cache entries")
+        
+        return removed
+    
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics.
         
@@ -157,7 +241,9 @@ class ContextCache:
         return {
             "total_entries": total_entries,
             "total_users": total_users,
-            "ttl_seconds": self._ttl.total_seconds()
+            "embedding_entries": len(self._embedding_cache),
+            "ttl_seconds": self._ttl.total_seconds(),
+            "embedding_ttl_seconds": self._embedding_ttl.total_seconds()
         }
 
 

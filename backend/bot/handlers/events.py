@@ -1,6 +1,7 @@
 """Bot event handlers."""
 
 import sys
+import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -18,7 +19,26 @@ from bot.services.database_service import (
 from bot.services.intent_detector import detect_past_reference_intent
 from bot.services.context_injector import inject_past_context
 from bot.services.context_cache import ContextCache, generate_cache_key
+from bot.services.conversation_memory import ConversationMemory, monitor_conversation_memory
+from bot.services.memory_compressor import (
+    summarize_conversation_segment,
+    inject_summary_into_context,
+    remove_old_messages
+)
+from bot.services.shadow_memory import ShadowMemory
+from bot.services.filler_generator import generate_filler, should_use_filler
+from bot.services.performance_monitor import get_performance_monitor
+from bot.services.cost_tracker import estimate_session_cost, log_cost_summary
 from datetime import datetime
+import time
+import random
+
+from app.core.observability import (
+    get_tracer,
+    record_context_fetch_event,
+    record_turn_metrics_event,
+    record_session_event,
+)
 
 if TYPE_CHECKING:
     from pipecat.pipeline.task import PipelineTask
@@ -36,146 +56,36 @@ async def setup_event_handlers(
     room_name: str,
     context: "OpenAILLMContext",
     context_cache: ContextCache = None,
+    memory_manager: ConversationMemory = None,
+    performance_monitor = None,
+    shadow_memory: ShadowMemory = None,
 ) -> None:
-    """Setup event handlers for transport.
-
-    Args:
-        transport: LiveKit transport instance.
-        task: Pipeline task instance.
-        transcript_storage: Transcript storage instance.
-        user_name: User's display name.
-        room_name: Room name.
-        context: LLM context for accessing messages.
-        context_cache: Optional context cache for dynamic queries.
-    """
+    """Setup event handlers for transport."""
     from pipecat.frames.frames import LLMMessagesFrame
     
-    async def handle_past_reference_query(user_message: str) -> bool:
-        """Handle past reference queries by detecting intent and retrieving context.
-        
-        Args:
-            user_message: User's message text
-            
-        Returns:
-            True if context was injected, False otherwise
-        """
-        if not settings.ENABLE_DYNAMIC_CONTEXT or not settings.INTENT_DETECTION_ENABLED:
-            return False
-        
-        try:
-            # Detect intent
-            intent = detect_past_reference_intent(user_message)
-            
-            if not intent.has_intent:
-                return False
-            
-            logger.info(f"🔍 Detected past reference intent: {intent.intent_type} (confidence: {intent.confidence:.2f})")
-            
-            # Generate cache key
-            cache_key = generate_cache_key(
-                intent_type=intent.intent_type,
-                query_text=intent.query_text,
-                date_range=intent.date_range,
-                topics=intent.topics
-            )
-            
-            # Check cache first
-            cached_sessions = None
-            if context_cache:
-                cached_sessions = context_cache.get(user_name, cache_key)
-            
-            if cached_sessions:
-                logger.info(f"✅ Cache hit for query: {cache_key}")
-                sessions = cached_sessions
-            else:
-                # Query database based on intent type
-                sessions = []
-                query_start = datetime.now()
-                
-                if intent.intent_type == 'date' and intent.date_range:
-                    # Date-based query
-                    logger.info(f"📅 Querying sessions by date range")
-                    sessions = await get_sessions_by_date_range(
-                        user_name,
-                        intent.date_range['start'],
-                        intent.date_range['end']
-                    )
-                elif intent.intent_type == 'topic' and intent.topics:
-                    # Topic-based query (try semantic first, fallback to keyword)
-                    logger.info(f"🔎 Querying sessions by topic: {', '.join(intent.topics)}")
-                    if settings.ENABLE_SEMANTIC_SEARCH and intent.query_text:
-                        sessions = await get_sessions_by_semantic_search(
-                            user_name,
-                            intent.query_text,
-                            limit=settings.MAX_DYNAMIC_SESSIONS,
-                            threshold=settings.SEMANTIC_SEARCH_THRESHOLD
-                        )
-                    
-                    # Fallback to keyword search if semantic search returned no results
-                    if not sessions and intent.topics:
-                        logger.info("Falling back to keyword search")
-                        sessions = await get_sessions_by_topic(
-                            user_name,
-                            intent.topics,
-                            limit=settings.MAX_DYNAMIC_SESSIONS
-                        )
-                elif intent.intent_type == 'semantic' or (intent.intent_type == 'general' and intent.query_text):
-                    # Semantic search for general queries
-                    if settings.ENABLE_SEMANTIC_SEARCH and intent.query_text:
-                        logger.info(f"🧠 Querying sessions by semantic search: {intent.query_text[:50]}...")
-                        sessions = await get_sessions_by_semantic_search(
-                            user_name,
-                            intent.query_text,
-                            limit=settings.MAX_DYNAMIC_SESSIONS,
-                            threshold=settings.SEMANTIC_SEARCH_THRESHOLD
-                        )
-                    
-                    # Fallback to keyword search if semantic search failed
-                    if not sessions and intent.topics:
-                        logger.info("Falling back to keyword search")
-                        sessions = await get_sessions_by_topic(
-                            user_name,
-                            intent.topics,
-                            limit=settings.MAX_DYNAMIC_SESSIONS
-                        )
-                else:
-                    # General query - get all sessions
-                    logger.info("📚 Querying all sessions")
-                    sessions = await get_all_sessions(
-                        user_name,
-                        limit=settings.MAX_DYNAMIC_SESSIONS
-                    )
-                
-                query_duration = (datetime.now() - query_start).total_seconds()
-                logger.info(f"⏱️  Query completed in {query_duration:.2f}s, found {len(sessions)} sessions")
-                
-                # Cache results
-                if context_cache and sessions:
-                    context_cache.set(user_name, cache_key, sessions)
-            
-            # Inject context if we have sessions
-            if sessions:
-                logger.info(f"💉 Injecting {len(sessions)} sessions into context")
-                success = inject_past_context(
-                    context,
-                    sessions,
-                    user_name,
-                    query_text=intent.query_text
-                )
-                if success:
-                    logger.info("✅ Successfully injected past context")
-                    return True
-                else:
-                    logger.warning("⚠️  Failed to inject past context")
-            else:
-                logger.info("ℹ️  No relevant sessions found for query")
-            
-            return False
-            
-        except Exception as e:
-            logger.error(f"Error handling past reference query: {e}", exc_info=True)
-            return False
+# NOTE: Past reference dynamic context fetching is now handled exclusively
+# by `PastContextProcessor` in the pipeline. The event handlers here focus on:
+# - TTFT / full turn duration metrics
+# - Conversation memory compression
+# - Session summary generation and Supabase persistence
 
+async def setup_event_handlers(
+    transport,
+    task: "PipelineTask",
+    transcript_storage: "TranscriptStorage",
+    user_name: str,
+    room_name: str,
+    context: "OpenAILLMContext",
+    context_cache: ContextCache = None,
+    memory_manager: ConversationMemory = None,
+    performance_monitor = None,
+    shadow_memory: ShadowMemory = None,
+) -> None:
+    """Setup event handlers for transport."""
+    from pipecat.frames.frames import LLMMessagesFrame
+    
+    # Initialize memory manager if not provided
+    
     async def save_session_if_needed():
         """Save session summary if conditions are met."""
         try:
@@ -240,8 +150,12 @@ async def setup_event_handlers(
 
             logger.info(f"Generating summary for {len(transcript)} messages, duration: {duration:.1f}s")
             
-            # Generate summary
-            summary = await generate_session_summary(transcript, user_name, duration)
+            # Generate summary (pass performance monitor to track tokens)
+            summary = await generate_session_summary(
+                transcript, user_name, duration,
+                performance_monitor=performance_monitor,
+                room_name=room_name
+            )
             
             if not summary or len(summary.strip()) < 10:
                 logger.error("Generated summary is too short or empty, not saving")
@@ -270,32 +184,234 @@ async def setup_event_handlers(
         except Exception as e:
             logger.error(f"Error saving session summary: {e}", exc_info=True)
 
-    @transport.event_handler("on_participant_joined")
-    async def on_participant_joined(transport, participant):
-        """Handle participant joined event."""
-        logger.info(f"👤 Participant joined: {participant.identity}")
+    monitoring_started = False
+
+    async def _start_session_monitoring(participant_id: str):
+        """Start session monitoring once when the first participant joins."""
+        nonlocal monitoring_started
+        if monitoring_started:
+            return
+        monitoring_started = True
+
+        logger.info(f"👤 Participant joined: {participant_id}")
         logger.info(f"   Session started at: {transcript_storage.session_start}")
+
+        # Record session start in Langfuse (if configured)
+        record_session_event(
+            event_name="session_started",
+            user_name=user_name,
+            room_name=room_name,
+            properties={"participant_id": participant_id},
+        )
         
-        # Monitor messages for past references
-        # Note: This is a simplified approach. In a production system, you might want
-        # to hook into the message processing pipeline more directly.
-        async def monitor_messages():
-            """Monitor context messages for past references."""
-            if not settings.ENABLE_DYNAMIC_CONTEXT:
+        # Track last processed message to avoid reprocessing
+        last_processed_message = {"content": "", "count": 0}
+        user_message_timestamps = {}  # Track when user messages were received for TTFT
+        last_turn_used_past_context = False  # Track if past context was used in current turn
+        
+        # Extract core processing logic (event-based, no polling)
+        async def process_messages(messages):
+            """Process messages for past references, TTFT, and memory management.
+            
+            This is called event-based when context changes, not via polling.
+            """
+            if not messages:
                 return
             
             try:
-                messages = context.get_messages()
-                if messages:
-                    # Get the last user message
-                    for msg in reversed(messages):
-                        if msg.get("role") == "user":
-                            user_message = msg.get("content", "")
-                            if user_message:
-                                await handle_past_reference_query(user_message)
-                            break
+                nonlocal last_turn_used_past_context
+                # Get the last user message
+                for msg in reversed(messages):
+                    if msg.get("role") == "user":
+                        user_message = msg.get("content", "")
+                        if user_message and (
+                            user_message != last_processed_message["content"]
+                            or len(messages) != last_processed_message["count"]
+                        ):
+                            # New message detected - track timestamp for TTFT
+                            user_message_timestamps[user_message] = datetime.now()
+                            last_processed_message["content"] = user_message
+                            last_processed_message["count"] = len(messages)
+                            
+                            # Reset context flag for new turn
+                            last_turn_used_past_context = False
+                            
+                            # Note: Past reference query handling has been moved to 
+                            # PastContextProcessor in the pipeline to prevent race conditions.
+                            # The observer still monitors messages for TTFT and memory.
+                        break
+                
+                # Check for TTFT: when assistant responds after user message
+                for i, msg in enumerate(messages):
+                    if msg.get("role") == "assistant" and i > 0:
+                        # Find the most recent user message before this assistant message
+                        user_msg = ""
+                        for j in range(i - 1, -1, -1):
+                            if messages[j].get("role") == "user":
+                                user_msg = messages[j].get("content", "")
+                                break
+
+                        if user_msg and user_msg in user_message_timestamps:
+                            turn_duration_ms = (datetime.now() - user_message_timestamps[user_msg]).total_seconds() * 1000
+                            logger.info(f"⏱️  Full Turn Duration: {turn_duration_ms:.0f}ms")
+                            
+                            # Record in performance monitor
+                            if performance_monitor:
+                                performance_monitor.record_request(
+                                    user_name, room_name, "full_turn_duration", turn_duration_ms, success=True
+                                )
+                            
+                            # Send per-turn metrics to Langfuse (sampled/gated)
+                            if getattr(settings, "LANGFUSE_TURN_METRICS_ENABLED", True):
+                                if not (settings.is_production and not getattr(settings, "LANGFUSE_TURN_METRICS_IN_PROD", True)):
+                                    sample_rate = float(getattr(settings, "LANGFUSE_TURN_SAMPLE_RATE", 1.0))
+                                    if sample_rate >= 1.0 or (sample_rate > 0.0 and random.random() <= sample_rate):
+                                        record_turn_metrics_event(
+                                            user_name=user_name,
+                                            room_name=room_name,
+                                            ttft_ms=turn_duration_ms,
+                                            used_past_context=last_turn_used_past_context,
+                                        )
+                            
+                            # Remove from tracking
+                            del user_message_timestamps[user_msg]
+                
+                # Check memory management
+                await check_and_summarize_memory()
+                
+                # Update Shadow Memory after response (background, non-blocking)
+                await update_shadow_memory_after_response()
             except Exception as e:
-                logger.debug(f"Error monitoring messages: {e}")
+                logger.debug(f"Error processing messages: {e}")
+        
+        # Event-based context observer (replaces polling) - attach to the real context object
+        def attach_message_observer():
+            original_get_messages = context.get_messages
+            # state includes a reentrancy guard to prevent loops
+            state = {"last_count": 0, "processing": False, "in_wrapper": False}
+
+            async def on_message_changed(messages):
+                try:
+                    await process_messages(messages)
+                finally:
+                    state["processing"] = False
+
+            def get_messages_wrapper():
+                # Re-entrancy guard: if we are already inside the wrapper, 
+                # just return the messages without triggering a new task.
+                if state["in_wrapper"]:
+                    return original_get_messages()
+                
+                state["in_wrapper"] = True
+                try:
+                    msgs = original_get_messages()
+                    current_count = len(msgs) if msgs else 0
+                    
+                    # Only trigger if the count actually changed AND we aren't already processing
+                    if current_count != state["last_count"] and not state["processing"]:
+                        state["last_count"] = current_count
+                        # Set processing flag IMMEDIATELY before spawning task to prevent race conditions
+                        state["processing"] = True
+                        asyncio.create_task(on_message_changed(msgs))
+                    return msgs
+                finally:
+                    state["in_wrapper"] = False
+
+            context.get_messages = get_messages_wrapper
+        
+        async def check_and_summarize_memory():
+            """Check if memory compression is needed and perform it.
+            
+            Implements Strategy 4: Semantic Context Compression with Running Summaries.
+            """
+            if not memory_manager or not getattr(settings, "ENABLE_CONVERSATION_MEMORY", True):
+                return
+            if not getattr(settings, "ENABLE_INCREMENTAL_SUMMARIES", True):
+                return
+            
+            try:
+                # 1. Proactive Safety: Prune context if it exceeds hard limits (Context Guard)
+                # This prevents TPD limit overflows even if summarization hasn't happened yet
+                from bot.services.context_manager import prune_context_if_needed
+                messages = context.get_messages()
+                
+                # Max tokens for history is set to 4000 (~16k chars) to stay within safe TPD
+                pruned_messages, was_pruned = prune_context_if_needed(
+                    messages, 
+                    max_tokens=4000, 
+                    keep_recent=10
+                )
+                if was_pruned:
+                    context.get_messages()[:] = pruned_messages
+                    logger.info("🛡️ Context Guard: Pruned middle messages to protect TPD limits")
+                
+                # 2. Strategic Summarization: Periodic compression into running summary
+                status = monitor_conversation_memory(context, memory_manager)
+                
+                if not status.get("should_summarize", False):
+                    return
+                
+                logger.info(
+                    f"📊 Memory compression triggered: {status.get('message_count', 0)} messages, "
+                    f"{status.get('estimated_tokens', 0)} tokens"
+                )
+                
+                # Get messages to compress
+                to_summarize, to_keep = memory_manager.get_messages_to_summarize(messages)
+                
+                if not to_summarize:
+                    return
+                
+                # Summarize segment and merge into running summary
+                new_summary = await summarize_conversation_segment(
+                    to_summarize, 
+                    user_name,
+                    previous_summary=memory_manager.running_summary
+                )
+                
+                if new_summary:
+                    # Update memory manager state
+                    memory_manager.running_summary = new_summary
+                    
+                    # Calculate message range
+                    message_range = (
+                        len(messages) - len(to_summarize) - len(to_keep),
+                        len(messages) - len(to_keep)
+                    )
+                    
+                    # Inject into context (handles replacement if already exists)
+                    success = inject_summary_into_context(context, new_summary, message_range)
+                    
+                    if success:
+                        # Remove full-text messages that were summarized
+                        removed_count = remove_old_messages(context, to_summarize)
+                        memory_manager.record_summarization(len(messages) - removed_count)
+                        memory_manager.add_rolling_summary(new_summary, message_range)
+                        
+                        logger.info(
+                            f"✅ Session continuity preserved via updated running summary "
+                            f"({len(new_summary)} chars)"
+                        )
+                    else:
+                        logger.warning("Failed to inject summary into context")
+                else:
+                    logger.warning("Failed to generate summary for memory compression")
+                    
+            except Exception as e:
+                logger.error(f"Error in memory compression: {e}", exc_info=True)
+        
+        async def update_shadow_memory_after_response():
+            """Update Shadow Memory cache after LLM response (background, non-blocking)."""
+            if shadow_memory:
+                try:
+                    # Update cache in background (don't block)
+                    await shadow_memory.update_after_response()
+                except Exception as e:
+                    logger.debug(f"Error updating Shadow Memory (non-critical): {e}")
+        
+        # Always attach observer so TTFT is tracked even when dynamic context is off
+        attach_message_observer()
+        logger.debug("✅ Event-based message monitoring enabled (triggers on context change)")
         
         # Trigger the bot to greet the user immediately
         try:
@@ -306,6 +422,16 @@ async def setup_event_handlers(
         except Exception as e:
             logger.error(f"❌ Error greeting user: {e}", exc_info=True)
 
+    @transport.event_handler("on_first_participant_joined")
+    async def on_first_participant_joined(transport, participant_id: str):
+        """Handle first participant joined event (LiveKit)."""
+        await _start_session_monitoring(participant_id)
+
+    @transport.event_handler("on_participant_connected")
+    async def on_participant_connected(transport, participant_id: str):
+        """Handle participant connected event (LiveKit)."""
+        await _start_session_monitoring(participant_id)
+
     @transport.event_handler("on_participant_left")
     async def on_participant_left(transport, *args):
         """Handle participant left event."""
@@ -313,8 +439,25 @@ async def setup_event_handlers(
         logger.info("👋 User left the room - attempting to save session summary")
         logger.info(f"   User: {user_name}")
         logger.info(f"   Room: {room_name}")
+        
+        # Log performance and cost summary
+        if performance_monitor:
+            metrics = performance_monitor.get_session_metrics(user_name, room_name)
+            if metrics and getattr(settings, 'TRACK_COSTS', True):
+                cost_breakdown = estimate_session_cost(
+                    total_input_tokens=metrics.get('total_tokens_input', 0),
+                    total_output_tokens=metrics.get('total_tokens_output', 0),
+                    embedding_tokens=0  # Could track this separately if needed
+                )
+                log_cost_summary(user_name, room_name, cost_breakdown)
+        
         # Save session summary before cleanup
         await save_session_if_needed()
+        
+        # Cleanup performance monitoring
+        if performance_monitor:
+            performance_monitor.cleanup_session(user_name, room_name)
+        
         logger.info("Cleaning up task...")
         try:
             await task.cancel()
@@ -323,15 +466,43 @@ async def setup_event_handlers(
             logger.error(f"❌ Error canceling task: {e}", exc_info=True)
         logger.info("=" * 60)
 
-    @transport.event_handler("on_call_ended")
-    async def on_call_ended(transport):
-        """Handle call ended event."""
+    @transport.event_handler("on_call_state_updated")
+    async def on_call_state_updated(transport, state: str):
+        """Handle call state updates (LiveKit)."""
+        if state not in {"ended", "disconnected", "terminated"}:
+            return
+
         logger.info("=" * 60)
-        logger.info("📞 Call ended by server - attempting to save session summary")
+        logger.info(f"📞 Call state updated: {state} - attempting to save session summary")
         logger.info(f"   User: {user_name}")
         logger.info(f"   Room: {room_name}")
+
+        # Record session end in Langfuse (if configured)
+        record_session_event(
+            event_name="session_ended",
+            user_name=user_name,
+            room_name=room_name,
+            properties={"state": state},
+        )
+        
+        # Log performance and cost summary
+        if performance_monitor:
+            metrics = performance_monitor.get_session_metrics(user_name, room_name)
+            if metrics and getattr(settings, 'TRACK_COSTS', True):
+                cost_breakdown = estimate_session_cost(
+                    total_input_tokens=metrics.get('total_tokens_input', 0),
+                    total_output_tokens=metrics.get('total_tokens_output', 0),
+                    embedding_tokens=0  # Could track this separately if needed
+                )
+                log_cost_summary(user_name, room_name, cost_breakdown)
+        
         # Save session summary before cleanup
         await save_session_if_needed()
+        
+        # Cleanup performance monitoring
+        if performance_monitor:
+            performance_monitor.cleanup_session(user_name, room_name)
+        
         logger.info("Cleaning up task...")
         try:
             await task.cancel()

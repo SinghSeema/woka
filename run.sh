@@ -48,6 +48,28 @@ cd ..
 echo -e "\n${GREEN}Starting services...${NC}\n"
 echo -e "${YELLOW}Note: Make sure LiveKit server is running!${NC}\n"
 
+# Ensure a TCP port is free before starting a service on it
+ensure_port_free() {
+    local port="$1"
+    # Try lsof first, fall back to fuser if available
+    local pids=""
+    if command -v lsof >/dev/null 2>&1; then
+        pids="$(lsof -ti tcp:${port} || true)"
+    elif command -v fuser >/dev/null 2>&1; then
+        # fuser exits non‑zero if nothing is using the port, so ignore errors
+        pids="$(fuser -k ${port}/tcp 2>/dev/null || true)"
+    fi
+
+    if [ -n "$pids" ]; then
+        echo -e "${YELLOW}Port ${port} is in use by PID(s): ${pids}. Attempting to stop them...${NC}"
+        # If lsof gave us PIDs, kill them; if fuser was used with -k it already killed
+        if command -v lsof >/dev/null 2>&1; then
+            kill ${pids} 2>/dev/null || true
+        fi
+        sleep 2
+    fi
+}
+
 # Function to cleanup on exit
 cleanup() {
     echo -e "\n${YELLOW}Stopping services...${NC}"
@@ -108,16 +130,23 @@ while IFS= read -r line; do
     fi
 done < ../.env
 set +a
+# Ensure LiveKit / Pipecat logs are not overly verbose.
+# These env vars are respected by LiveKit agents / Pipecat logging setup.
+export LOG_LEVEL=info
+export LIVEKIT_LOG_LEVEL=info
+export PIPECAT_LOG_LEVEL=info
+
 python -m bot.main dev &
 BOT_PID=$!
 cd ..
 
 sleep 2
 
-# Start frontend
+# Start frontend (always on port 5173; if busy, free it first)
 echo -e "${BLUE}Starting Frontend on http://localhost:5173${NC}"
+ensure_port_free 5173
 cd frontend
-npm run dev &
+npm run dev -- --port 5173 &
 FRONTEND_PID=$!
 cd ..
 

@@ -103,7 +103,7 @@ async def save_session_summary(
         # Generate embedding for semantic search if enabled
         embedding = None
         if settings.ENABLE_SEMANTIC_SEARCH:
-            logger.info(f"🔄 Generating embedding for session summary (length: {len(summary)} chars)")
+            # Generate embedding for session summary (no verbose logging of vector contents)
             try:
                 embedding = await generate_embedding(summary.strip())
                 if embedding:
@@ -116,8 +116,6 @@ async def save_session_summary(
                             f"Saving without embedding to avoid error."
                         )
                         embedding = None
-                    else:
-                        logger.info(f"✅ Generated embedding for session summary ({actual_dim} dimensions, matches schema)")
                 else:
                     logger.warning("⚠️  Failed to generate embedding, saving without embedding")
             except Exception as e:
@@ -134,11 +132,16 @@ async def save_session_summary(
             # created_at and updated_at are handled by database defaults and triggers
         }
         
-        # Add embedding if available
+        # Add embedding if available (do not log full embedding contents)
         if embedding:
             data["embedding"] = embedding
 
-        logger.info(f"Inserting into 'sessions' table: {data}")
+        # Log only high-level info, not full payload/embedding
+        logger.info(
+            f"Inserting session summary into 'sessions' table "
+            f"(user={normalized_name}, room={room_name}, duration={int(duration_seconds)}s, messages={message_count}, "
+            f"has_embedding={bool(embedding)})"
+        )
         result = client.table("sessions").insert(data).execute()
         
         if result.data:
@@ -204,7 +207,7 @@ async def get_past_sessions(user_name: str, limit: int = 2) -> List[Dict[str, An
                 f"✅ Retrieved {len(sessions)} past sessions for {user_name} "
                 f"(requested: {limit})"
             )
-            # Log details of retrieved sessions
+            # Log details of retrieved sessions (high level only)
             for i, session in enumerate(sessions[:3], 1):  # Log first 3
                 summary = session.get("summary", "")
                 created_at = session.get("created_at", "")
@@ -213,6 +216,14 @@ async def get_past_sessions(user_name: str, limit: int = 2) -> List[Dict[str, An
                 logger.info(
                     f"   Session {i}: {date_str} (room: {room_name}, "
                     f"summary: {len(summary)} chars)"
+                )
+            # Debug-level previews of summaries fetched from Supabase
+            for i, s in enumerate(sessions[:3], 1):
+                raw_summary = (s.get("summary", "") or "")
+                summary_preview = raw_summary[:300].replace("\n", " ")
+                logger.debug(
+                    f"[past-context] Fetched past_session {i} summary preview "
+                    f"(len={len(raw_summary)}): {summary_preview}"
                 )
         else:
             logger.info(f"ℹ️  No past sessions found for {user_name} - new user or no history")
@@ -317,6 +328,14 @@ async def get_sessions_by_semantic_search(
             for i, session in enumerate(sessions[:3], 1):
                 similarity = session.get("similarity", 0.0)
                 logger.info(f"   Session {i}: similarity={similarity:.3f}")
+            # Debug-level summary previews
+            for i, s in enumerate(sessions[:3], 1):
+                raw_summary = (s.get("summary", "") or "")
+                summary_preview = raw_summary[:300].replace("\n", " ")
+                logger.debug(
+                    f"[past-context] Fetched semantic session {i} summary preview "
+                    f"(len={len(raw_summary)}): {summary_preview}"
+                )
         else:
             logger.info(f"ℹ️  No sessions found above threshold {threshold} for semantic search")
         
@@ -378,6 +397,14 @@ async def get_sessions_by_date_range(
                 f"✅ Retrieved {len(sessions)} sessions for {user_name} "
                 f"between {start_date.date()} and {end_date.date()}"
             )
+            # Debug-level summary previews
+            for i, s in enumerate(sessions[:3], 1):
+                raw_summary = (s.get("summary", "") or "")
+                summary_preview = raw_summary[:300].replace("\n", " ")
+                logger.debug(
+                    f"[past-context] Fetched date_range session {i} summary preview "
+                    f"(len={len(raw_summary)}): {summary_preview}"
+                )
         else:
             logger.info(f"ℹ️  No sessions found for {user_name} in date range")
         
@@ -458,6 +485,14 @@ async def get_sessions_by_topic(
                 f"✅ Found {len(filtered_sessions)} sessions for {user_name} "
                 f"with topics: {', '.join(topic_keywords)}"
             )
+            # Debug-level summary previews
+            for i, s in enumerate(filtered_sessions[:3], 1):
+                raw_summary = (s.get("summary", "") or "")
+                summary_preview = raw_summary[:300].replace("\n", " ")
+                logger.debug(
+                    f"[past-context] Fetched topic session {i} summary preview "
+                    f"(len={len(raw_summary)}): {summary_preview}"
+                )
         else:
             logger.info(f"ℹ️  No sessions found for {user_name} with topics: {', '.join(topic_keywords)}")
         
@@ -509,6 +544,14 @@ async def get_all_sessions(user_name: str, limit: int = 50) -> List[Dict[str, An
                 f"✅ Retrieved {len(sessions)} sessions for {user_name} "
                 f"(requested: {limit})"
             )
+            # Debug-level summary previews
+            for i, s in enumerate(sessions[:3], 1):
+                raw_summary = (s.get("summary", "") or "")
+                summary_preview = raw_summary[:300].replace("\n", " ")
+                logger.debug(
+                    f"[past-context] Fetched all_sessions {i} summary preview "
+                    f"(len={len(raw_summary)}): {summary_preview}"
+                )
         else:
             logger.info(f"ℹ️  No sessions found for {user_name}")
         

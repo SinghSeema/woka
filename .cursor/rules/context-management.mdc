@@ -1,0 +1,109 @@
+# Context Management Rules
+
+## Critical Rules for LLM Input Context
+
+When working with LLM context in this project, **ALWAYS** follow these rules:
+
+### System Prompt Rules
+
+1. **Keep system prompts concise**: Maximum 2000 characters (500 tokens) for base prompt
+2. **Use the context manager**: Always use `bot/services/context_manager.py` utilities when building context
+3. **Validate before sending**: Use `validate_context_size()` to check context before sending to LLM
+4. **Log context sizes**: Always log character counts and token estimates
+
+### Past Session Context Rules
+
+1. **Respect limits**: Maximum 10 past sessions (configurable via `MAX_PAST_SESSIONS`)
+2. **Use truncation**: Always use `build_past_context()` which automatically truncates summaries
+3. **Check total size**: Past context should not exceed 8000 characters (configurable via `MAX_PAST_CONTEXT_SIZE`)
+4. **Truncate summaries**: Individual summaries should not exceed 400 characters (configurable via `MAX_SUMMARY_LENGTH`)
+
+### Token Budget
+
+- **Model**: `llama-3.3-70b-versatile` (128K context window)
+- **Safety margin**: Use max 100K tokens (80% of limit)
+- **Allocation**:
+  - System Prompt: 2K tokens (2%)
+  - Past Session Context: 8K tokens (8%)
+  - Conversation History: 90K tokens (90%)
+
+### Token Estimation
+
+- **Formula**: ~4 characters per token (English text)
+- **Always estimate**: Use `estimate_tokens()` from context_manager
+
+### When Adding New Context
+
+**BEFORE** adding any new context to system prompts or past sessions:
+
+1. ✅ Estimate token usage
+2. ✅ Check if it fits in budget
+3. ✅ Consider if it's necessary
+4. ✅ Use context manager utilities
+5. ✅ Validate with `validate_context_size()`
+6. ✅ Log sizes and warnings
+
+### Configuration
+
+All limits are configurable in `backend/app/core/config.py`:
+- `MAX_PAST_SESSIONS` (default: 10)
+- `MAX_PAST_CONTEXT_SIZE` (default: 8000 characters)
+- `MAX_SUMMARY_LENGTH` (default: 400 characters)
+- `SYSTEM_PROMPT_MAX_SIZE` (default: 2000 characters)
+- `SYSTEM_PROMPT_ERROR_SIZE` (default: 3000 characters)
+
+### Implementation Pattern
+
+```python
+from bot.services.context_manager import (
+    build_past_context,
+    validate_context_size,
+    estimate_tokens
+)
+
+# Build past context (automatically truncates)
+past_context, sessions_included = build_past_context(past_sessions, user_name)
+
+# Build system prompt
+system_prompt = f"""
+## ROLE
+...
+{past_context}
+"""
+
+# Validate before using
+is_valid, warning = validate_context_size(system_prompt, past_context, model_context_window=128000)
+if not is_valid:
+    raise ValueError(f"Context validation failed: {warning}")
+if warning:
+    logger.warning(f"Context warning: {warning}")
+
+# Log token estimates
+system_tokens = estimate_tokens(system_prompt)
+past_tokens = estimate_tokens(past_context)
+logger.info(f"Context: {system_tokens} + {past_tokens} = {system_tokens + past_tokens} tokens")
+```
+
+### Never Do This
+
+❌ **Don't** manually build past context strings without using `build_past_context()`
+❌ **Don't** include more than 10 past sessions without checking configuration
+❌ **Don't** skip validation before sending context to LLM
+❌ **Don't** ignore warnings about context size
+❌ **Don't** hardcode limits - use configuration values
+
+### Always Do This
+
+✅ **Do** use `build_past_context()` for past session context
+✅ **Do** use `validate_context_size()` before sending to LLM
+✅ **Do** log context sizes and token estimates
+✅ **Do** respect configuration limits
+✅ **Do** truncate summaries that exceed limits
+✅ **Do** check documentation in `docs/CONTEXT_MANAGEMENT.md` for details
+
+### Related Files
+
+- **Context Manager**: `backend/bot/services/context_manager.py`
+- **Configuration**: `backend/app/core/config.py`
+- **Main Bot Logic**: `backend/bot/main.py`
+- **Full Documentation**: `docs/CONTEXT_MANAGEMENT.md`

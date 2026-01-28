@@ -2,16 +2,20 @@
 
 import React, { useState, useEffect } from "react";
 import { LandingPage } from "./LandingPage";
+import { ConnectingView } from "./ConnectingView";
 import { RoomView } from "./RoomView";
 import { getToken, healthCheck } from "../services/api";
 import { handleApiError, logError } from "../utils/errorHandler";
 
 /**
  * Main Voice Assistant component.
+ * Manages state flow: LandingPage -> ConnectingView -> RoomView
  */
 export function VoiceAssistant() {
   const [roomData, setRoomData] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
     // Health check on mount
@@ -29,14 +33,30 @@ export function VoiceAssistant() {
     try {
       const data = await getToken(userName);
       setRoomData(data);
+      setIsConnecting(true);
+      setIsReady(false);
     } catch (error) {
       logError(error, "handleConnect");
       throw error;
     }
   };
 
+  const handleConnectingReady = () => {
+    setIsReady(true);
+    setIsConnecting(false);
+  };
+
+  const handleConnectingError = (error) => {
+    console.error("Connection error:", error);
+    setIsConnecting(false);
+    setRoomData(null);
+    // Could show error toast here
+  };
+
   const handleDisconnect = () => {
     setRoomData(null);
+    setIsConnecting(false);
+    setIsReady(false);
   };
 
   if (isLoading) {
@@ -50,10 +70,21 @@ export function VoiceAssistant() {
     );
   }
 
-  if (roomData) {
-    return <RoomView roomData={roomData} onDisconnect={handleDisconnect} />;
+  // Show connecting view while pipeline initializes, or room view when ready
+  // Keep ConnectingView mounted to maintain the same LiveKitRoom connection
+  if (roomData && (isConnecting || isReady)) {
+    return (
+      <ConnectingView
+        roomData={roomData}
+        onReady={handleConnectingReady}
+        onError={handleConnectingError}
+        onDisconnect={handleDisconnect}
+        showRoomView={isReady}
+      />
+    );
   }
 
+  // Show landing page
   return <LandingPage onConnect={handleConnect} />;
 }
 

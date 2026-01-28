@@ -1,0 +1,262 @@
+"""Shadow Memory service for asynchronous context pre-warming and caching.
+
+This implements the "Shadow Memory" strategy where context is pre-warmed
+asynchronously during handshake and updated in the background, keeping
+the critical path (User Speaking → AI Responding) fast.
+"""
+
+import sys
+import asyncio
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+from datetime import datetime
+
+backend_dir = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(backend_dir))
+
+from app.core.config import settings
+from app.core.logging import get_logger
+from bot.services.database_service import get_past_sessions
+from bot.services.context_cache import ContextCache, generate_cache_key
+
+logger = get_logger(__name__)
+
+
+class ShadowMemory:
+    """Manages asynchronous context pre-warming and background updates."""
+    
+    def __init__(self, context_cache: ContextCache, user_name: str):
+        """Initialize Shadow Memory.
+        
+        Args:
+            context_cache: ContextCache instance for storing pre-warmed data
+            user_name: User's name for session-specific caching
+        """
+        self.context_cache = context_cache
+        self.user_name = user_name
+        self.prewarmed = False
+        self.last_update = None
+        logger.debug(f"Initialized Shadow Memory for {user_name}")
+    
+    async def prewarm(
+        self, 
+        limit: int = 5,
+        inject_into_context: Optional[Any] = None
+    ) -> List[Dict[str, Any]]:
+        """Pre-warm cache with last N sessions asynchronously.
+        
+        This runs in the background during handshake, not blocking the critical path.
+        
+        Args:
+            limit: Number of recent sessions to pre-warm (default: 5)
+            inject_into_context: Optional OpenAILLMContext to inject pre-warmed sessions into
+            
+        Returns:
+            List of pre-warmed sessions
+        """
+        if limit <= 0:
+            logger.info(
+                f"Shadow Memory pre-warm disabled (limit={limit}) for {self.user_name}"
+            )
+            return []
+
+        if self.prewarmed:
+            logger.debug(f"Shadow Memory already pre-warmed for {self.user_name}")
+            return []
+        
+        try:
+            logger.info(f"🔥 Pre-warming Shadow Memory for {self.user_name} (fetching last {limit} sessions)...")
+            start_time = datetime.now()
+            
+            # Fetch last N sessions (non-blocking, async)
+            sessions = await get_past_sessions(self.user_name, limit=limit)
+            
+            if sessions:
+                # Cache common queries proactively
+                await self._cache_common_queries(sessions)
+                
+                # Inject into system prompt if context provided
+                if inject_into_context:
+                    await self._inject_into_initial_prompt(inject_into_context, sessions)
+                
+                duration = (datetime.now() - start_time).total_seconds()
+                logger.info(
+                    f"⏱️  Shadow Memory pre-warmed: {len(sessions)} sessions cached in {duration:.2f}s"
+                )
+            else:
+                logger.debug(f"No past sessions found for {self.user_name}")
+            
+            self.prewarmed = True
+            self.last_update = datetime.now()
+            
+            return sessions
+            
+        except Exception as e:
+            logger.error(f"Error pre-warming Shadow Memory: {e}", exc_info=True)
+            return []
+    
+    async def _inject_into_initial_prompt(
+        self,
+        context: Any,
+        sessions: List[Dict[str, Any]]
+    ) -> None:
+        """Inject pre-warmed sessions into the initial system prompt.
+        
+        Args:
+            context: OpenAILLMContext instance
+            sessions: List of sessions to inject
+        """
+        try:
+            from bot.services.context_manager import build_past_context
+            
+            # Build past context string
+            past_context, session_count = build_past_context(sessions, self.user_name)
+            
+            if not past_context:
+                logger.debug("No past context to inject")
+                return
+
+            # Debug: preview what Shadow Memory is adding to the initial prompt
+            preview = past_context[:600].replace("\n", " ")
+            logger.debug(
+                f"[shadow-memory] Built past_context for initial prompt "
+                f"(sessions={session_count}, chars={len(past_context)}): {preview}"
+            )
+            
+            # Get current messages
+            messages = context.get_messages()
+            if not messages:
+                logger.warning("No messages in context to inject past context")
+                return
+            
+            # Find the system message and append past context
+            # Use messages[:] = pattern to ensure changes persist (same as remove_old_messages)
+            updated_messages = []
+            injected = False
+            
+            for msg in messages:
+                if msg.get("role") == "system" and not injected:
+                    # Append past context to existing system prompt
+                    current_content = msg.get("content", "")
+                    updated_content = current_content + past_context
+                    updated_messages.append({
+                        "role": "system",
+                        "content": updated_content
+                    })
+                    injected = True
+                    
+                    logger.info(
+                        f"✅ Injected {session_count} pre-warmed sessions into initial system prompt "
+                        f"({len(past_context)} characters added, total system prompt: {len(updated_content)} chars)"
+                    )
+                else:
+                    updated_messages.append(msg)
+            
+            # If no system message found, add one at the beginning
+            if not injected:
+                logger.warning("No system message found, adding new one with past context")
+                updated_messages.insert(0, {
+                    "role": "system",
+                    "content": past_context
+                })
+            
+            # Replace entire messages list (this pattern works for OpenAILLMContext)
+            messages[:] = updated_messages
+            
+        except Exception as e:
+            logger.error(f"Error injecting pre-warmed sessions into prompt: {e}", exc_info=True)
+    
+    async def _cache_common_queries(self, sessions: List[Dict[str, Any]]) -> None:
+        """Cache common query patterns proactively.
+        
+        Args:
+            sessions: List of sessions to cache
+        """
+        if not sessions:
+            return
+        
+        # Cache "last session" query
+        if len(sessions) >= 1:
+            last_session_key = generate_cache_key(
+                intent_type="general",
+                query_text="last session"
+            )
+            self.context_cache.set(
+                self.user_name,
+                last_session_key,
+                [sessions[0]]  # Most recent session
+            )
+        
+        # Cache "recent sessions" query
+        recent_key = generate_cache_key(
+            intent_type="general",
+            query_text="recent sessions"
+        )
+        self.context_cache.set(
+            self.user_name,
+            recent_key,
+            sessions[:3]  # Last 3 sessions
+        )
+        
+        # Cache "all sessions" query
+        all_key = generate_cache_key(
+            intent_type="general",
+            query_text="all sessions"
+        )
+        self.context_cache.set(
+            self.user_name,
+            all_key,
+            sessions
+        )
+        
+        logger.debug(f"Cached {len(sessions)} sessions for common queries")
+    
+    async def update_after_response(self, current_sessions: Optional[List[Dict[str, Any]]] = None) -> None:
+        """Update cache after LLM response (background, non-blocking).
+        
+        This compresses and updates the cache with current session state
+        without blocking the response to the user.
+        
+        Args:
+            current_sessions: Optional current sessions to update cache with
+        """
+        try:
+            # This runs in background, don't block
+            if getattr(settings, "MAX_PAST_SESSIONS", 0) <= 0:
+                logger.debug(
+                    f"Shadow Memory update skipped (MAX_PAST_SESSIONS<=0) for {self.user_name}"
+                )
+                return
+
+            if current_sessions is None:
+                # Refresh from database (lightweight query)
+                current_sessions = await get_past_sessions(
+                    self.user_name, limit=min(3, settings.MAX_PAST_SESSIONS)
+                )
+            
+            if current_sessions:
+                # Update common queries
+                await self._cache_common_queries(current_sessions)
+                self.last_update = datetime.now()
+                logger.debug(f"Shadow Memory updated for {self.user_name}")
+            
+        except Exception as e:
+            logger.debug(f"Error updating Shadow Memory (non-critical): {e}")
+    
+    def get_cache_hit_rate(self) -> Optional[float]:
+        """Get cache hit rate if available.
+        
+        Returns:
+            Cache hit rate (0.0-1.0) or None if not tracked
+        """
+        # Could implement hit rate tracking here if needed
+        return None
+    
+    def is_prewarmed(self) -> bool:
+        """Check if Shadow Memory has been pre-warmed.
+        
+        Returns:
+            True if pre-warmed
+        """
+        return self.prewarmed
+

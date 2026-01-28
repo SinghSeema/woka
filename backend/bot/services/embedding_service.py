@@ -15,39 +15,72 @@ logger = get_logger(__name__)
 # Cache for embedding model (if using local model)
 _embedding_model = None
 
+# Global embedding cache (optional, set by caller)
+_embedding_cache = None
 
-async def generate_embedding(text: str) -> Optional[List[float]]:
+
+def set_embedding_cache(cache):
+    """Set the embedding cache instance.
+    
+    Args:
+        cache: ContextCache instance with embedding caching support
+    """
+    global _embedding_cache
+    _embedding_cache = cache
+    logger.debug("Embedding cache configured")
+
+
+async def generate_embedding(text: str, use_cache: bool = True) -> Optional[List[float]]:
     """Generate vector embedding for text.
     
     Args:
         text: Text to generate embedding for
+        use_cache: Whether to use embedding cache if available
         
     Returns:
         List of floats representing the embedding vector, or None if generation fails
     """
     if not text or not text.strip():
-        logger.warning("Empty text provided for embedding generation")
         return None
     
     if not settings.ENABLE_SEMANTIC_SEARCH:
-        logger.debug("Semantic search disabled, skipping embedding generation")
         return None
     
+    # Check cache first
+    if use_cache and _embedding_cache:
+        cached_embedding = _embedding_cache.get_embedding(text)
+        if cached_embedding:
+            return cached_embedding
+    
     try:
-        # Use OpenAI embeddings API
-        if settings.EMBEDDING_MODEL.startswith("text-embedding"):
+        embedding = None
+        
+        # Determine if we should use local or OpenAI
+        use_local = (
+            settings.EMBEDDING_MODEL == "local" or 
+            not settings.EMBEDDING_MODEL.startswith("text-embedding") or
+            not getattr(settings, 'OPENAI_API_KEY', None)
+        )
+
+        if not use_local:
             logger.debug("Attempting OpenAI embedding generation")
             embedding = await _generate_openai_embedding(text)
             if embedding:
+                if use_cache and _embedding_cache:
+                    _embedding_cache.set_embedding(text, embedding)
                 return embedding
-            # If OpenAI failed, fall through to local model
             logger.info("OpenAI embedding failed, falling back to local model")
         
-        # Use local model (either as primary or fallback)
-        logger.debug("Using local embedding model")
-        return await _generate_local_embedding(text)
+        # Use local model
+        embedding = await _generate_local_embedding(text)
+        
+        # Cache the embedding
+        if embedding and use_cache and _embedding_cache:
+            _embedding_cache.set_embedding(text, embedding)
+        
+        return embedding
     except Exception as e:
-        logger.error(f"❌ Error generating embedding: {e}", exc_info=True)
+        logger.error(f"❌ Error generating embedding: {e}")
         return None
 
 
@@ -84,7 +117,6 @@ async def _generate_openai_embedding(text: str) -> Optional[List[float]]:
             response.raise_for_status()
             result = response.json()
             embedding = result["data"][0]["embedding"]
-            logger.debug(f"Generated OpenAI embedding: {len(embedding)} dimensions")
             return embedding
             
     except ImportError:
@@ -108,51 +140,43 @@ async def _generate_openai_embedding(text: str) -> Optional[List[float]]:
 
 
 async def _generate_local_embedding(text: str) -> Optional[List[float]]:
-    """Generate embedding using local sentence-transformers model.
-    
-    Args:
-        text: Text to embed
-        
-    Returns:
-        Embedding vector or None
-    """
+    """Generate embedding using local sentence-transformers model."""
     global _embedding_model
     
     try:
         from sentence_transformers import SentenceTransformer
+        import asyncio
         
-        # Load model if not already loaded
+        # Load model if not already loaded (RUN IN THREAD to avoid blocking loop)
         if _embedding_model is None:
             model_name = getattr(settings, 'LOCAL_EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
-            logger.info(f"🔄 Loading local embedding model: {model_name} (this may take a moment on first load)")
+            logger.info(f"🔄 Loading local embedding model: {model_name}...")
+            
+            def load_model():
+                return SentenceTransformer(model_name)
+            
             try:
-                _embedding_model = SentenceTransformer(model_name)
-                logger.info(f"✅ Local embedding model loaded successfully: {model_name}")
+                # Use to_thread for Python 3.9+ or run_in_executor for older
+                _embedding_model = await asyncio.to_thread(load_model)
+                logger.info(f"✅ Local embedding model '{model_name}' loaded.")
             except Exception as load_error:
-                logger.error(f"❌ Failed to load embedding model {model_name}: {load_error}", exc_info=True)
+                logger.error(f"❌ Failed to load embedding model: {load_error}")
                 return None
         
         if _embedding_model is None:
-            logger.error("Embedding model is None after loading attempt")
             return None
         
-        # Generate embedding (run in thread pool to avoid blocking)
-        import asyncio
-        loop = asyncio.get_event_loop()
-        embedding = await loop.run_in_executor(
-            None,
-            lambda: _embedding_model.encode(text, convert_to_numpy=True).tolist()
+        # Generate embedding (run in thread pool)
+        embedding = await asyncio.to_thread(
+            _embedding_model.encode, text, convert_to_numpy=True
         )
-        logger.info(f"✅ Generated local embedding: {len(embedding)} dimensions")
-        return embedding
+        return embedding.tolist()
         
     except ImportError:
-        logger.error(
-            "❌ sentence-transformers not installed. Install with: pip install sentence-transformers"
-        )
+        logger.error("❌ sentence-transformers not installed.")
         return None
     except Exception as e:
-        logger.error(f"❌ Error generating local embedding: {e}", exc_info=True)
+        logger.error(f"❌ Error generating local embedding: {e}")
         return None
 
 

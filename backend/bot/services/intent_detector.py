@@ -50,11 +50,23 @@ def detect_past_reference_intent(user_message: str) -> PastReferenceIntent:
         'ago', 'yesterday', 'last week', 'last month',
         'did we discuss', 'did we talk', 'did i mention',
         'what progress', 'how am i doing', 'my goal',
-        'on [date]', 'in [month]', 'during'
+        'on [date]', 'in [month]', 'during',
+        'past sessions', 'past conversations', 'what we discussed',
+        'what we have discussed', 'what we talked about'
     ]
     
     # Check for past reference keywords
     has_past_keyword = any(keyword in message_lower for keyword in past_keywords)
+    
+    # Also check for variations like "what we have discussed", "what we've discussed"
+    if not has_past_keyword:
+        # Check for variations with "have" or "'ve"
+        variations = [
+            'what we have', 'what we\'ve', 'what we had',
+            'discussed in the past', 'talked about before',
+            'past session', 'previous session'
+        ]
+        has_past_keyword = any(variation in message_lower for variation in variations)
     
     if not has_past_keyword:
         return PastReferenceIntent(has_intent=False)

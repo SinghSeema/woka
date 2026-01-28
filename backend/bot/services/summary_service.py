@@ -14,7 +14,8 @@ logger = get_logger(__name__)
 
 
 async def generate_session_summary(
-    transcript: List[Dict[str, Any]], user_name: str, duration_seconds: float
+    transcript: List[Dict[str, Any]], user_name: str, duration_seconds: float,
+    performance_monitor=None, room_name: str = ""
 ) -> str:
     """Generate LLM-based session summary optimized for agentic memory context.
 
@@ -91,6 +92,28 @@ Comprehensive summary:"""
                 response.raise_for_status()
                 result = response.json()
                 summary = result["choices"][0]["message"]["content"].strip()
+                
+                # Extract token usage if available and track it
+                usage = result.get("usage", {})
+                if usage:
+                    input_tokens = usage.get("prompt_tokens", 0)
+                    output_tokens = usage.get("completion_tokens", 0)
+                    logger.debug(
+                        f"Summary generation tokens: input={input_tokens}, output={output_tokens}"
+                    )
+                    
+                    # Track in performance monitor if available
+                    if performance_monitor and room_name:
+                        performance_monitor.record_request(
+                            user_name=user_name,
+                            room_name=room_name,
+                            request_type='llm_summary',
+                            duration_ms=0,
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                            success=True
+                        )
+                
                 logger.info(f"Generated LLM summary for {user_name}: {len(summary)} chars")
                 return summary
 

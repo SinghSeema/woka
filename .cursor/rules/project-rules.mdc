@@ -1,0 +1,153 @@
+# Project Rules for Woka Wellness Voice AI Assistant
+
+## Project Overview
+
+This is a voice AI wellness coaching application built with:
+- **Frontend**: React 18 + Vite + Tailwind CSS
+- **Backend**: FastAPI (Python)
+- **Bot**: Pipecat AI + LiveKit Agents
+- **AI Services**: Groq (LLM), Deepgram (STT & TTS)
+- **Real-time**: LiveKit (WebRTC)
+
+## Code Style & Structure
+
+### Python Backend
+
+- Use type hints for all function parameters and return types
+- Follow PEP 8 style guidelines
+- Use Pydantic for configuration and data validation
+- Services should be in `backend/bot/services/` or `backend/app/services/`
+- Use dependency injection pattern for services
+- Always use the logging module from `app.core.logging`
+
+### React Frontend
+
+- Use functional components with hooks
+- Keep components small and focused
+- Use Tailwind CSS for styling
+- Handle errors gracefully with error boundaries
+- Use the API service layer for all backend calls
+
+## Critical Rules
+
+### 1. Context Management
+- **ALWAYS** follow rules in `context-management.mdc`
+- Never add context without validation
+- Use context manager utilities from `bot/services/context_manager.py`
+
+### 2. Error Handling
+- Always use try/except blocks for external API calls
+- Log errors with context using `get_logger(__name__)`
+- Never expose sensitive information in error messages
+- Use error boundaries in React components
+
+### 3. Security
+- Never commit API keys or secrets
+- Use environment variables for all configuration
+- Validate all user inputs
+- Use JWT tokens for authentication
+
+### 4. Logging
+- Use structured logging with appropriate levels (DEBUG, INFO, WARNING, ERROR)
+- Include context in log messages (user_name, room_name, etc.)
+- Log important state changes (session start, context building, etc.)
+
+### 5. Testing
+- Write tests for critical functionality
+- Test error cases, not just happy paths
+- Mock external services in tests
+
+## File Organization
+
+### Backend Structure
+```
+backend/
+├── app/              # FastAPI application
+│   ├── api/         # API routes
+│   ├── core/        # Core functionality (config, logging, security)
+│   └── utils/       # Utilities
+├── bot/             # Bot worker
+│   ├── services/    # AI service wrappers
+│   └── handlers/    # Event handlers
+└── tests/           # Tests
+```
+
+### Frontend Structure
+```
+frontend/src/
+├── components/      # React components
+├── hooks/           # Custom hooks
+├── services/        # API clients
+└── utils/           # Utilities
+```
+
+## Documentation
+
+- Update documentation when adding features
+- Keep `docs/CONTEXT_MANAGEMENT.md` up to date
+- Document API changes in code comments
+- Update README.md for major changes
+
+## Environment Variables
+
+Always check `.env.example` for required variables. Never hardcode:
+- API keys
+- URLs
+- Configuration values
+
+## When Making Changes
+
+1. ✅ Check existing patterns in the codebase
+2. ✅ Follow the established structure
+3. ✅ Update relevant documentation
+4. ✅ Test your changes
+5. ✅ Check for linting errors
+6. ✅ Validate context sizes if modifying LLM-related code
+
+## Common Patterns
+
+### Creating a Service
+```python
+# backend/bot/services/my_service.py
+from app.core.config import settings
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
+
+def create_my_service():
+    """Create and configure service."""
+    logger.info("Creating my service")
+    # Implementation
+    return service
+```
+
+### Adding Configuration
+```python
+# backend/app/core/config.py
+class Settings(BaseSettings):
+    MY_NEW_SETTING: str = Field(
+        default="default_value",
+        description="Description of setting"
+    )
+```
+
+### React Component Pattern
+```jsx
+// frontend/src/components/MyComponent.jsx
+import React, { useState, useEffect } from "react";
+import { handleApiError } from "../utils/errorHandler";
+
+export function MyComponent({ prop1, prop2 }) {
+  const [state, setState] = useState(null);
+
+  useEffect(() => {
+    // Side effects
+  }, []);
+
+  return (
+    <div>
+      {/* Component JSX */}
+    </div>
+  );
+}
+```

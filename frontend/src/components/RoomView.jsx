@@ -514,25 +514,13 @@ function Stage() {
 }
 
 /**
- * Room view component with Zoom-style interface.
+ * Room content component - renders inside LiveKitRoom context (doesn't create its own connection)
  * @param {Object} props - Component props
- * @param {Object} props.roomData - Room connection data
  * @param {Function} props.onDisconnect - Callback when disconnecting
  */
-export function RoomView({ roomData, onDisconnect }) {
-  if (!roomData) {
-    return null;
-  }
-
+export function RoomContent({ onDisconnect }) {
   return (
-    <LiveKitRoom
-      video={false}
-      audio={true}
-      token={roomData.token}
-      serverUrl={roomData.url}
-      connect={true}
-      className="h-screen w-screen flex flex-col bg-[#1a1a1a]"
-    >
+    <>
       {/* Zoom-style header */}
       <div className="bg-[#1a1a1a] border-b border-gray-800 px-4 md:px-6 py-3 flex items-center justify-between">
         <div className="flex items-center gap-2 md:gap-3">
@@ -560,6 +548,31 @@ export function RoomView({ roomData, onDisconnect }) {
       <ZoomControlBar onDisconnect={onDisconnect} />
 
       <RoomAudioRenderer />
+    </>
+  );
+}
+
+/**
+ * Room view component with Zoom-style interface.
+ * @param {Object} props - Component props
+ * @param {Object} props.roomData - Room connection data
+ * @param {Function} props.onDisconnect - Callback when disconnecting
+ */
+export function RoomView({ roomData, onDisconnect }) {
+  if (!roomData) {
+    return null;
+  }
+
+  return (
+    <LiveKitRoom
+      video={false}
+      audio={true}
+      token={roomData.token}
+      serverUrl={roomData.url}
+      connect={true}
+      className="h-screen w-screen flex flex-col bg-[#1a1a1a]"
+    >
+      <RoomContent onDisconnect={onDisconnect} />
     </LiveKitRoom>
   );
 }

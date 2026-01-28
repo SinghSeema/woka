@@ -63,11 +63,15 @@ class Settings(BaseSettings):
 
     # LLM Configuration
     LLM_MODEL: str = Field(default="llama-3.3-70b-versatile", description="Groq LLM model name")
+    SUMMARIZATION_MODEL: str = Field(
+        default="llama-3.1-8b-instant", 
+        description="Model to use for summarization and memory compression (cheaper/faster)"
+    )
 
     # Bot Configuration
     BOT_NAME: str = Field(default="Woka", description="Bot display name")
     VAD_THRESHOLD: float = Field(default=0.5, description="Voice Activity Detection threshold")
-    NUM_IDLE_PROCESSES: int = Field(default=3, description="Number of pre-warmed bot processes")
+    NUM_IDLE_PROCESSES: int = Field(default=1, description="Number of pre-warmed bot processes")
 
     # Session History (Supabase)
     SUPABASE_URL: Optional[str] = Field(default=None, description="Supabase project URL")
@@ -98,6 +102,38 @@ class Settings(BaseSettings):
     ENABLE_DYNAMIC_CONTEXT: bool = Field(
         default=True, description="Enable runtime context querying"
     )
+    
+    # Memory Management
+    ENABLE_CONVERSATION_MEMORY: bool = Field(
+        default=True, description="Enable conversation memory management for long sessions"
+    )
+    ENABLE_INCREMENTAL_SUMMARIES: bool = Field(
+        default=True,
+        description="Enable incremental running summaries during long sessions (in-memory only)",
+    )
+    MEMORY_SUMMARIZATION_THRESHOLD: int = Field(
+        default=50, description="Message count threshold to trigger summarization"
+    )
+    MEMORY_KEEP_RECENT: int = Field(
+        default=30, description="Number of recent messages to keep in full detail"
+    )
+    MEMORY_SUMMARY_FREQUENCY: int = Field(
+        default=25, description="Summarize every N messages after threshold"
+    )
+    
+    # Performance Monitoring
+    ENABLE_PERFORMANCE_MONITORING: bool = Field(
+        default=True, description="Enable performance monitoring and metrics collection"
+    )
+    TRACK_TOKEN_USAGE: bool = Field(
+        default=True, description="Track token usage per request"
+    )
+    TRACK_COSTS: bool = Field(
+        default=True, description="Track and log API costs per session"
+    )
+    PERFORMANCE_LOG_INTERVAL: int = Field(
+        default=10, description="Log performance metrics every N requests"
+    )
     INITIAL_SESSIONS_COUNT: int = Field(
         default=2, description="Number of sessions to load at startup"
     )
@@ -116,7 +152,10 @@ class Settings(BaseSettings):
         default=True, description="Enable semantic search with embeddings"
     )
     EMBEDDING_MODEL: str = Field(
-        default="text-embedding-3-small", description="Embedding model name"
+        default="local", description="Embedding model name (use 'local' for Sentence Transformers)"
+    )
+    LOCAL_EMBEDDING_MODEL: str = Field(
+        default="all-MiniLM-L6-v2", description="Local SentenceTransformer model name"
     )
     SEMANTIC_SEARCH_THRESHOLD: float = Field(
         default=0.7, description="Minimum similarity threshold for semantic search"
@@ -132,6 +171,39 @@ class Settings(BaseSettings):
     RATE_LIMIT_ENABLED: bool = Field(default=True, description="Enable rate limiting")
     RATE_LIMIT_REQUESTS: int = Field(default=100, description="Rate limit requests per minute")
     RATE_LIMIT_WINDOW: int = Field(default=60, description="Rate limit window in seconds")
+
+    # Tracing / Observability
+    ENABLE_TRACING: bool = Field(
+        default=False, description="Enable OpenTelemetry tracing (Jaeger/OTel collector)"
+    )
+    JAEGER_ENDPOINT: Optional[str] = Field(
+        default=None,
+        description="OTLP trace endpoint for Jaeger/OTel collector (e.g. http://localhost:4317)",
+    )
+
+    # Langfuse
+    ENABLE_LANGFUSE: bool = Field(
+        default=False, description="Enable Langfuse observability for dev"
+    )
+    LANGFUSE_PUBLIC_KEY: Optional[str] = Field(
+        default=None, description="Langfuse public key"
+    )
+    LANGFUSE_SECRET_KEY: Optional[str] = Field(
+        default=None, description="Langfuse secret key"
+    )
+    LANGFUSE_HOST: Optional[str] = Field(
+        default="https://cloud.langfuse.com",
+        description="Langfuse host URL (use http://localhost:3000 for local dev)",
+    )
+    LANGFUSE_TURN_METRICS_ENABLED: bool = Field(
+        default=True, description="Enable turn-by-turn Langfuse metrics"
+    )
+    LANGFUSE_TURN_METRICS_IN_PROD: bool = Field(
+        default=True, description="Allow turn-by-turn Langfuse metrics in production"
+    )
+    LANGFUSE_TURN_SAMPLE_RATE: float = Field(
+        default=1.0, ge=0.0, le=1.0, description="Sampling rate for turn-by-turn metrics"
+    )
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

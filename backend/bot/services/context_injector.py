@@ -3,6 +3,7 @@
 import sys
 from pathlib import Path
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
+from datetime import datetime
 
 backend_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(backend_dir))
@@ -41,6 +42,7 @@ def inject_past_context(
         logger.debug("No sessions to inject")
         return False
     
+    injection_start_time = datetime.now()
     try:
         # Format sessions into context string
         context_text = _format_sessions_for_injection(sessions, user_name, query_text)
@@ -56,6 +58,14 @@ def inject_past_context(
             # Truncate sessions if needed
             context_text = _truncate_context(context_text, MAX_INJECTED_CONTEXT_TOKENS)
             estimated_tokens = estimate_tokens(context_text)
+
+        # Debug: log compact preview of what we are about to inject
+        injection_preview = context_text[:600].replace("\n", " ")
+        logger.debug(
+            f"[past-context] Final injected context preview "
+            f"(sessions={len(sessions)}, tokens≈{estimated_tokens}, chars={len(context_text)}): "
+            f"{injection_preview}"
+        )
         
         # Inject as system message
         # Note: OpenAILLMContext may not support adding system messages mid-conversation
@@ -68,22 +78,36 @@ def inject_past_context(
         # Try to add to context
         try:
             messages = context.get_messages()
-            # Insert before the last user message (if any) or at the beginning
-            if messages:
-                # Find last system message and insert after it, or insert at position 1 (after initial system prompt)
-                insert_pos = 1
-                for i, msg in enumerate(messages):
-                    if msg.get("role") == "system":
-                        insert_pos = i + 1
-                
-                # Add the injection
-                messages.insert(insert_pos, injection_message)
-                # Update context (this may not be directly supported, so we log it)
-                logger.info(f"Injected {len(sessions)} sessions into context ({estimated_tokens} tokens)")
-                logger.debug(f"Injection message length: {len(context_text)} characters")
-            else:
+            if not messages:
                 logger.warning("No existing messages in context, cannot inject")
                 return False
+            
+            # Find the primary system message (the one with the role description)
+            # Prepending/Appending to the primary instruction is much more reliable
+            # than adding separate system messages mid-stream.
+            system_msg_index = -1
+            for i, msg in enumerate(messages):
+                if msg.get("role") == "system":
+                    system_msg_index = i
+                    break
+            
+            if system_msg_index >= 0:
+                # Append to existing system prompt
+                current_content = messages[system_msg_index].get("content", "")
+                # Add a clear separator
+                updated_content = current_content + "\n\n" + context_text
+                messages[system_msg_index]["content"] = updated_content
+                logger.info(f"✅ Appended past context to primary system prompt (total size: {len(updated_content)} chars)")
+            else:
+                # Fallback: Insert at beginning
+                messages.insert(0, injection_message)
+                logger.info("✅ Inserted new system message for past context")
+            
+            injection_duration = (datetime.now() - injection_start_time).total_seconds() * 1000
+            logger.info(
+                f"💉 Context injection: SUCCESS, sessions={len(sessions)}, "
+                f"tokens={estimated_tokens} in {injection_duration:.0f}ms"
+            )
                 
         except Exception as e:
             logger.error(f"Error adding injection to context: {e}", exc_info=True)
@@ -120,8 +144,11 @@ def _format_sessions_for_injection(
     else:
         context_parts.append("## ADDITIONAL CONTEXT (Retrieved Past Sessions)\n")
     
+    # Make it explicit how the model should use this information.
     context_parts.append(
-        f"The following past session summaries are relevant to the current conversation:\n\n"
+        "You have access to the following past session summaries. "
+        "Treat them as ground truth about the user's prior sessions and use them "
+        "to answer the current question.\n\n"
     )
     
     for i, session in enumerate(sessions, 1):
