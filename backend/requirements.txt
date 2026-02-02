@@ -8,4 +8,13 @@ livekit-agents>=0.8.0
 pipecat-ai[silero]>=0.0.79
 supabase>=2.0.0
 httpx>=0.25.0
+langfuse
+opentelemetry-sdk
+opentelemetry-exporter-otlp
+# torch is installed separately in Dockerfile with CPU-only version
+# to avoid downloading CUDA libraries (~2GB+)
+sentence-transformers
+groq>=0.4.0
+# Pipecat 0.0.100 requires deepgram-sdk v3.x (v5.x has breaking API changes)
+deepgram-sdk>=3.2.0,<4.0.0
 

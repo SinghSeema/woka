@@ -1,0 +1,88 @@
+version: '3.8'
+
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: woka-bot-agent
+    # Use host network mode so container can access localhost services (LiveKit)
+    network_mode: host
+    # Mount backend code as volume for development (changes picked up without rebuild)
+    volumes:
+      - ./backend:/app/backend:ro  # Read-only mount (use :rw if you need to write)
+    environment:
+      # LiveKit - use localhost since we're on host network
+      # LIVEKIT_URL: for agent to connect locally
+      # LIVEKIT_PUBLIC_URL: for frontend to connect (use localhost for local dev)
+      - LIVEKIT_URL=${LIVEKIT_URL:-ws://127.0.0.1:7880}
+      - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL:-ws://localhost:7880}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET}
+      # Groq
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      # Supabase
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - SUPABASE_ENABLED=${SUPABASE_ENABLED:-true}
+      # Langfuse
+      - ENABLE_LANGFUSE=${ENABLE_LANGFUSE:-false}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      # App config
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - DEBUG=${DEBUG:-false}
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      # CORS_ORIGINS - commented out to use default from config.py
+      # Default includes: http://localhost:5173, http://localhost:3000
+      # To add more origins, uncomment and set as comma-separated string (no brackets)
+      # - CORS_ORIGINS=http://localhost:5173,http://localhost:15173,https://app.woka.ai
+      # Bot config
+      - BOT_NAME=${BOT_NAME:-Woka}
+      - VAD_THRESHOLD=${VAD_THRESHOLD:-0.5}
+      - NUM_IDLE_PROCESSES=${NUM_IDLE_PROCESSES:-1}
+      # Optional: Deepgram if used
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
+      - DEEPGRAM_TTS_VOICE=${DEEPGRAM_TTS_VOICE:-aura-2-helena-en}
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs", "||", "exit", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        # Build-time args (Vite bakes these into the JS bundle)
+        # Using localhost for local development
+        - VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:8000}
+        # Note: VITE_LIVEKIT_URL is not used - frontend gets LiveKit URL from backend API
+        - VITE_LIVEKIT_URL=${VITE_LIVEKIT_URL:-}
+    container_name: woka-bot-frontend
+    # Port mapping optional - tunnel can reach via Docker network
+    # Changed to 15173 to avoid conflict with local frontend on 5173
+    ports:
+      - "15173:80"  # Access locally at http://localhost:15173
+    depends_on:
+      - agent
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://127.0.0.1/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+
+networks:
+  default:
+    name: woka-bot-network
+

@@ -16,7 +16,7 @@ sys.path.insert(0, str(backend_dir))
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from bot.services.database_service import get_past_sessions
+from bot.services.database_service import get_past_sessions, get_past_session_embeddings
 from bot.services.context_cache import ContextCache, generate_cache_key
 
 logger = get_logger(__name__)
@@ -36,6 +36,7 @@ class ShadowMemory:
         self.user_name = user_name
         self.prewarmed = False
         self.last_update = None
+        self.cached_embeddings: List[Dict[str, Any]] = []  # Store embeddings for local search
         logger.debug(f"Initialized Shadow Memory for {user_name}")
     
     async def prewarm(
@@ -68,7 +69,32 @@ class ShadowMemory:
             logger.info(f"🔥 Pre-warming Shadow Memory for {self.user_name} (fetching last {limit} sessions)...")
             start_time = datetime.now()
             
-            # Fetch last N sessions (non-blocking, async)
+            # OPTIMIZATION: Pre-warm embeddings first (lighter, faster)
+            # Fetch only embeddings (summary + embedding vector) instead of full sessions
+            logger.info(f"📥 [FLOW-STEP-1] Fetching embeddings for {self.user_name}...")
+            embedding_data = await get_past_session_embeddings(self.user_name, limit=limit)
+            if embedding_data:
+                # Store for local similarity search
+                logger.info(
+                    f"💾 [FLOW-STEP-1] Storing {len(embedding_data)} embeddings in Shadow Memory "
+                    f"(each has summary + embedding vector)"
+                )
+                for i, item in enumerate(embedding_data[:3], 1):  # Log first 3
+                    summary = item.get("summary", "")
+                    embedding = item.get("embedding")
+                    summary_preview = summary[:100].replace("\n", " ") if summary else "N/A"
+                    embedding_dim = len(embedding) if embedding else 0
+                    logger.info(
+                        f"   Embedding {i}: summary_len={len(summary)}, "
+                        f"embedding_dim={embedding_dim}, preview='{summary_preview}...'"
+                    )
+                self.cached_embeddings = embedding_data
+                await self._prewarm_embedding_cache(embedding_data)
+                logger.info(f"✅ [FLOW-STEP-1] Embeddings stored and ready for similarity search")
+            else:
+                logger.warning(f"⚠️  [FLOW-STEP-1] No embeddings found for {self.user_name}")
+            
+            # Fetch last N sessions (non-blocking, async) for session cache
             sessions = await get_past_sessions(self.user_name, limit=limit)
             
             if sessions:
@@ -81,7 +107,8 @@ class ShadowMemory:
                 
                 duration = (datetime.now() - start_time).total_seconds()
                 logger.info(
-                    f"⏱️  Shadow Memory pre-warmed: {len(sessions)} sessions cached in {duration:.2f}s"
+                    f"⏱️  Shadow Memory pre-warmed: {len(sessions)} sessions cached, "
+                    f"{len(embedding_data)} embeddings cached in {duration:.2f}s"
                 )
             else:
                 logger.debug(f"No past sessions found for {self.user_name}")
@@ -211,6 +238,43 @@ class ShadowMemory:
         
         logger.debug(f"Cached {len(sessions)} sessions for common queries")
     
+    async def _prewarm_embedding_cache(self, embedding_data: List[Dict[str, Any]]) -> None:
+        """Pre-warm embedding cache with session summary embeddings.
+        
+        OPTIMIZATION: Store embeddings in embedding cache so they don't need to be
+        regenerated during semantic search queries.
+        
+        Args:
+            embedding_data: List of dicts with 'summary' and 'embedding' keys
+        """
+        if not embedding_data:
+            return
+        
+        try:
+            from bot.services.embedding_service import _embedding_cache
+            
+            if not _embedding_cache:
+                logger.debug("Embedding cache not available, skipping pre-warm")
+                return
+            
+            cached_count = 0
+            for item in embedding_data:
+                summary = item.get("summary", "").strip()
+                embedding = item.get("embedding")
+                
+                if summary and embedding:
+                    # Store in embedding cache (key is summary text hash)
+                    _embedding_cache.set_embedding(summary, embedding)
+                    cached_count += 1
+            
+            if cached_count > 0:
+                logger.info(
+                    f"✅ Pre-warmed embedding cache with {cached_count} session embeddings "
+                    f"(faster semantic search)"
+                )
+        except Exception as e:
+            logger.debug(f"Error pre-warming embedding cache (non-critical): {e}")
+    
     async def update_after_response(self, current_sessions: Optional[List[Dict[str, Any]]] = None) -> None:
         """Update cache after LLM response (background, non-blocking).
         
@@ -259,4 +323,12 @@ class ShadowMemory:
             True if pre-warmed
         """
         return self.prewarmed
+    
+    def get_cached_embeddings(self) -> List[Dict[str, Any]]:
+        """Get cached embeddings for local similarity search.
+        
+        Returns:
+            List of dicts with 'summary' and 'embedding' keys
+        """
+        return self.cached_embeddings.copy()
 

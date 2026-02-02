@@ -74,10 +74,13 @@ async def get_token(
             )
         )
 
+        # Use public URL if set, otherwise fall back to regular URL
+        livekit_url = settings.LIVEKIT_PUBLIC_URL or settings.LIVEKIT_URL
+        
         response = TokenResponse(
             room_name=room_name,
             token=token.to_jwt(),
-            url=settings.LIVEKIT_URL,
+            url=livekit_url,
         )
 
         logger.info(f"Token generated successfully for user: {user}, room: {room_name}")

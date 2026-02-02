@@ -29,12 +29,9 @@ from bot.services.llm_service import create_llm_service
 from bot.services.stt_service import create_stt_service
 from bot.services.tts_service import create_tts_service
 from bot.services.transcript_storage import TranscriptStorage
-from bot.services.context_cache import ContextCache
-from bot.services.conversation_memory import ConversationMemory
-from bot.services.shadow_memory import ShadowMemory
-from bot.services.performance_monitor import get_performance_monitor
-from bot.services.embedding_service import set_embedding_cache
+from bot.services.memory_services import initialize_memory_services
 from bot.services.langfuse_metrics import LangfuseMetrics, LlmRequestStartProcessor
+from bot.services.prompt_builder import build_base_system_prompt
 
 
 # Setup logging
@@ -103,31 +100,13 @@ async def entrypoint(ctx: JobContext):
         transcript_storage.set_session_id(ctx.room.name)
         logger.info(f"Initialized transcript storage for session: {ctx.room.name}")
 
-        # Initialize context cache for dynamic queries
-        context_cache = None
-        if settings.ENABLE_DYNAMIC_CONTEXT:
-            context_cache = ContextCache(ttl_seconds=settings.CONTEXT_CACHE_TTL)
-            set_embedding_cache(context_cache)
-            logger.info(f"✅ Initialized context cache (TTL: {settings.CONTEXT_CACHE_TTL}s)")
-        
-        # Initialize Shadow Memory for async pre-warming
-        shadow_memory = None
-        if settings.ENABLE_DYNAMIC_CONTEXT and context_cache:
-            shadow_memory = ShadowMemory(context_cache, user_name)
-            logger.info("✅ Initialized Shadow Memory")
-        
-        # Initialize conversation memory manager
-        memory_manager = None
-        if getattr(settings, 'ENABLE_CONVERSATION_MEMORY', True):
-            memory_manager = ConversationMemory()
-            logger.info("✅ Initialized conversation memory manager")
-        
-        # Initialize performance monitor
-        performance_monitor = None
-        if getattr(settings, 'ENABLE_PERFORMANCE_MONITORING', True):
-            performance_monitor = get_performance_monitor()
-            performance_monitor.start_session(user_name, ctx.room.name)
-            logger.info("✅ Initialized performance monitor")
+        # OPTIMIZATION: Initialize all memory services in one place
+        # This decouples memory initialization from entrypoint and makes it testable
+        memory_services = await initialize_memory_services(user_name, ctx.room.name)
+        context_cache = memory_services.context_cache
+        shadow_memory = memory_services.shadow_memory
+        memory_manager = memory_services.memory_manager
+        performance_monitor = memory_services.performance_monitor
 
         # OPTIMIZATION: Skip past context loading at startup for faster pipeline initialization
         # Past context will be loaded on-demand via dynamic context queries if needed
@@ -194,31 +173,7 @@ async def entrypoint(ctx: JobContext):
         # OPTIMIZATION: Build system prompt WITHOUT past context for fast startup
         # Past context will be loaded on-demand via dynamic context queries if needed
         logger.debug("📋 Building system prompt (past context skipped for fast startup)...")
-        base_system_prompt_template = f"""
-        ## ROLE
-        You are "{settings.BOT_NAME}," an empathetic, professional, and motivational Wellness Coach. Your goal is to help {user_name} achieve their health goals through lifestyle, habit formation, and positive mindset shifts.
-
-        ## CORE PRINCIPLES
-        1. **Scope of Practice:** You provide advice on nutrition, exercise, sleep, and stress management. 
-        2. **Safety First:** You are NOT a doctor, therapist, or medical professional. 
-        3. **Guardrails:** If {user_name} asks for medical diagnoses, prescriptions, or advice on chronic illnesses/injuries, you must refuse and redirect to a professional.
-        4. **Ethics:** Never encourage extreme diets, self-harm, or dangerous physical activities. If a request is "wrong" or potentially harmful, politely decline.
-
-        ## BOUNDARIES & DISCLAIMERS
-        - **Mandatory Disclaimer:** If a user asks about a health condition, start with: "I'm here to support your wellness journey, but I'm not a medical professional. Please consult a doctor for medical concerns."
-        - **Refusal Protocol:** If the user asks something outside your scope or unethical, say: "I'm focused on wellness coaching (habits, movement, and mindset). I cannot provide advice on [Topic], as that falls outside my expertise."
-
-        ## STYLE & TONE
-        - **Tone:** Grounded, encouraging, and clear. 
-        - **Style:** Keep responses concise (ideal for voice interaction). Avoid long lists.
-        - **Greeting:** Start by warmly greeting {user_name} and acknowledging their progress.
-
-        ## INITIAL TASK
-        Greet {user_name} and ask how their energy levels are today.
-        """
-        
-        # Start with base prompt only (no past context)
-        system_prompt = base_system_prompt_template
+        system_prompt = build_base_system_prompt(user_name)
         messages = [{"role": "system", "content": system_prompt}]
         context = OpenAILLMContext(messages)
         context_aggregator = llm.create_context_aggregator(context)
@@ -245,7 +200,8 @@ async def entrypoint(ctx: JobContext):
             user_name=user_name,
             room_name=ctx.room.name,
             context=context,
-            context_cache=context_cache
+            context_cache=context_cache,
+            shadow_memory=shadow_memory  # Pass for local embedding search
         )
 
         langfuse_metrics = LangfuseMetrics(

@@ -137,7 +137,8 @@ def _extract_topics(message: str) -> List[str]:
         'sleep', 'nutrition', 'diet', 'exercise', 'workout', 'fitness',
         'stress', 'anxiety', 'mental health', 'meditation', 'mindfulness',
         'weight', 'health', 'wellness', 'habits', 'routine', 'schedule',
-        'energy', 'mood', 'pain', 'injury', 'recovery'
+        'energy', 'mood', 'pain', 'injury', 'recovery', 'illness',
+        'symptoms', 'medicine', 'medication', 'doctor', 'treatment'
     ]
     
     found_topics = []
@@ -146,13 +147,36 @@ def _extract_topics(message: str) -> List[str]:
             found_topics.append(topic)
     
     # Try to extract topic after "about" or "regarding"
-    about_pattern = r'(?:about|regarding|concerning|related to)\s+([a-z\s]+?)(?:\?|\.|$)'
+    about_pattern = r'(?:about|regarding|concerning|related to|discuss|talked about|discussed)\s+([a-z\s]+?)(?:\?|\.|$)'
     match = re.search(about_pattern, message)
     if match:
         topic_text = match.group(1).strip()
-        # Extract key words from topic text
+        # Extract key words from topic text (words longer than 2 chars)
         words = topic_text.split()
-        found_topics.extend([w for w in words if len(w) > 3])
+        found_topics.extend([w for w in words if len(w) > 2])
+    
+    # Also extract any meaningful words from the query itself (not just after "about")
+    # Look for common question patterns: "what did we discuss [topic]"
+    discuss_pattern = r'(?:discuss|talk|mention|say)\s+(?:about\s+)?([a-z\s]+?)(?:\?|\.|$)'
+    match = re.search(discuss_pattern, message)
+    if match:
+        topic_text = match.group(1).strip()
+        words = topic_text.split()
+        found_topics.extend([w for w in words if len(w) > 2])
+    
+    # Remove common stop words (expanded list including "about" and other common words)
+    stop_words = {
+        'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+        'we', 'did', 'do', 'what', 'when', 'where', 'how', 'why', 'about', 'regarding', 'concerning',
+        'related', 'discuss', 'discussed', 'talk', 'talked', 'mention', 'mentioned', 'say', 'said',
+        'this', 'that', 'these', 'those', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+        'have', 'has', 'had', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'must',
+        'wait', 'waiting', 'just', 'only', 'also', 'too', 'very', 'much', 'more', 'most', 'some',
+        'past', 'previous', 'before', 'ago', 'last', 'time', 'times'
+    }
+    found_topics = [t for t in found_topics if t not in stop_words]
+    
+    logger.info(f"🔍 [INTENT] Extracted topics: {found_topics} from message: '{message[:100]}'")
     
     return list(set(found_topics))  # Remove duplicates
 

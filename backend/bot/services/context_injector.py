@@ -42,10 +42,33 @@ def inject_past_context(
         logger.debug("No sessions to inject")
         return False
     
+    logger.info(
+        f"💉 [FLOW-STEP-4] Starting prompt injection: "
+        f"sessions={len(sessions)}, user={user_name}, query='{query_text[:50] if query_text else 'N/A'}...'"
+    )
+    
+    # Verify we have summary text
+    for i, session in enumerate(sessions, 1):
+        summary = session.get("summary", "")
+        similarity = session.get("similarity")
+        similarity_str = f"{similarity:.3f}" if similarity is not None else "N/A"
+        logger.info(
+            f"   Session {i} for injection: "
+            f"has_summary={'✅' if summary else '❌'}, "
+            f"summary_len={len(summary)}, "
+            f"similarity={similarity_str}"
+        )
+        if not summary:
+            logger.warning(f"   ⚠️  Session {i} has NO summary text - cannot inject!")
+    
     injection_start_time = datetime.now()
     try:
         # Format sessions into context string
+        logger.info(f"📝 [FLOW-STEP-4] Formatting {len(sessions)} sessions into context text...")
         context_text = _format_sessions_for_injection(sessions, user_name, query_text)
+        logger.info(
+            f"✅ [FLOW-STEP-4] Context text formatted: len={len(context_text)} chars"
+        )
         
         # Estimate tokens
         estimated_tokens = estimate_tokens(context_text)
@@ -97,7 +120,16 @@ def inject_past_context(
                 # Add a clear separator
                 updated_content = current_content + "\n\n" + context_text
                 messages[system_msg_index]["content"] = updated_content
-                logger.info(f"✅ Appended past context to primary system prompt (total size: {len(updated_content)} chars)")
+                logger.info(
+                    f"✅ [FLOW-STEP-4] Injected summary text into system prompt: "
+                    f"original_size={len(current_content)} chars, "
+                    f"new_size={len(updated_content)} chars, "
+                    f"injected_size={len(context_text)} chars"
+                )
+                logger.info(
+                    f"🎯 [FLOW-COMPLETE] Summary text successfully injected into prompt! "
+                    f"Flow: Embedding → Similarity Search → Matches → Summary Text → Prompt ✅"
+                )
             else:
                 # Fallback: Insert at beginning
                 messages.insert(0, injection_message)

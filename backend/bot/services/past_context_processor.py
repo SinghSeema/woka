@@ -13,6 +13,12 @@ from pipecat.frames.frames import Frame, LLMContextFrame
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 
+# Try to import OpenAILLMContextFrame if available
+try:
+    from pipecat.frames.frames import OpenAILLMContextFrame
+except ImportError:
+    OpenAILLMContextFrame = None
+
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.observability import record_context_fetch_event
@@ -36,6 +42,7 @@ class PastContextProcessor(FrameProcessor):
         room_name: str, 
         context: OpenAILLMContext,
         context_cache: Optional[ContextCache] = None,
+        shadow_memory = None,  # Optional ShadowMemory for local embedding search
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -43,65 +50,167 @@ class PastContextProcessor(FrameProcessor):
         self._room_name = room_name
         self._context = context
         self._context_cache = context_cache
+        self._shadow_memory = shadow_memory
         self._processed_queries = set()
+        
+        # Log initialization with settings
+        logger.info(
+            f"🔧 [DYNAMIC-QUERY] PastContextProcessor initialized: "
+            f"user={user_name}, room={room_name}, "
+            f"ENABLE_DYNAMIC_CONTEXT={settings.ENABLE_DYNAMIC_CONTEXT}, "
+            f"ENABLE_SEMANTIC_SEARCH={settings.ENABLE_SEMANTIC_SEARCH}, "
+            f"has_context_cache={context_cache is not None}, "
+            f"has_shadow_memory={shadow_memory is not None}"
+        )
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         # Let base class handle system frames, internal state, etc.
         await super().process_frame(frame, direction)
 
+        frame_type = type(frame).__name__
+        
+        # Log ALL frames to see what's coming through (but only once per frame type to avoid spam)
+        if not hasattr(self, '_logged_frame_types'):
+            self._logged_frame_types = set()
+        if frame_type not in self._logged_frame_types:
+            logger.info(f"🔍 [DYNAMIC-QUERY] First frame of type '{frame_type}' received (direction={direction})")
+            self._logged_frame_types.add(frame_type)
+        
+        # Check for both LLMContextFrame and OpenAILLMContextFrame (pipecat might use different types)
+        is_context_frame = (
+            isinstance(frame, LLMContextFrame) or 
+            (OpenAILLMContextFrame and isinstance(frame, OpenAILLMContextFrame)) or
+            "ContextFrame" in frame_type or 
+            "LLMContext" in frame_type
+        )
+        
+        # Log when we receive any context frame to verify it's being called
+        if is_context_frame:
+            logger.info(
+                f"🔵 [DYNAMIC-QUERY] Received context frame! "
+                f"frame_type={frame_type}, direction={direction}, is_downstream={direction == FrameDirection.DOWNSTREAM}"
+            )
+
         # We only care about downstream LLMContextFrames (triggers for LLM).
         # All other frames are simply passed through unchanged.
-        if isinstance(frame, LLMContextFrame) and direction == FrameDirection.DOWNSTREAM:
+        # Check for both LLMContextFrame and frame type string match
+        if is_context_frame and direction == FrameDirection.DOWNSTREAM:
+            logger.info(
+                f"✅ [DYNAMIC-QUERY] Received context frame (DOWNSTREAM) - checking for user message..."
+            )
             try:
-                messages = frame.context.get_messages()
+                # Try different ways to access messages (frame structure may vary)
+                messages = None
+                if hasattr(frame, 'context') and hasattr(frame.context, 'get_messages'):
+                    messages = frame.context.get_messages()
+                elif hasattr(frame, 'messages'):
+                    messages = frame.messages
+                elif hasattr(frame, 'context') and hasattr(frame.context, 'messages'):
+                    messages = frame.context.messages
+                
+                logger.info(
+                    f"📋 [DYNAMIC-QUERY] Messages in context: {len(messages) if messages else 0}"
+                )
+                if messages:
+                    # Log all message roles to debug
+                    roles = [msg.get("role", "unknown") if isinstance(msg, dict) else getattr(msg, "role", "unknown") for msg in messages]
+                    logger.info(f"   Message roles: {roles}")
             except Exception as e:
-                logger.debug(f"PastContextProcessor: error getting messages from context: {e}")
+                logger.warning(f"⚠️  [DYNAMIC-QUERY] Error getting messages from context: {e}", exc_info=True)
                 await self.push_frame(frame, direction)
                 return
 
             if not messages:
+                logger.info(f"⚠️  [DYNAMIC-QUERY] No messages in context, skipping")
                 await self.push_frame(frame, direction)
                 return
 
             # Get the last user message
             user_message = ""
             for msg in reversed(messages):
-                if msg.get("role") == "user":
-                    user_message = msg.get("content", "")
+                # Handle both dict and object message formats
+                if isinstance(msg, dict):
+                    role = msg.get("role", "")
+                    content = msg.get("content", "")
+                else:
+                    role = getattr(msg, "role", "")
+                    content = getattr(msg, "content", "")
+                
+                logger.debug(f"   Checking message: role={role}, content_len={len(content) if content else 0}")
+                if role == "user":
+                    user_message = content
                     break
 
             if not user_message:
+                logger.info(f"⚠️  [DYNAMIC-QUERY] No user message found in context messages, skipping")
                 await self.push_frame(frame, direction)
                 return
 
+            logger.info(
+                f"👤 [DYNAMIC-QUERY] Found user message: '{user_message[:100]}...' "
+                f"(len={len(user_message)})"
+            )
+
             # Check if we should fetch context. If dynamic context is disabled,
             # we exit immediately and never touch Supabase / embeddings.
-            if settings.ENABLE_DYNAMIC_CONTEXT:
-                injected = await self._handle_fetch(user_message)
-                if injected:
-                    # Update the frame with the newly injected context before pushing
-                    # Note: inject_past_context modifies self._context in place
-                    frame = LLMContextFrame(self._context)
+            if not settings.ENABLE_DYNAMIC_CONTEXT:
+                logger.warning(
+                    f"⚠️  [DYNAMIC-QUERY] ENABLE_DYNAMIC_CONTEXT is DISABLED - skipping past context fetch"
+                )
+                await self.push_frame(frame, direction)
+                return
+
+            logger.info(
+                f"✅ [DYNAMIC-QUERY] ENABLE_DYNAMIC_CONTEXT is enabled - processing user message..."
+            )
+            injected = await self._handle_fetch(user_message)
+            if injected:
+                logger.info(
+                    f"✅ [DYNAMIC-QUERY] Context injected successfully, updating frame..."
+                )
+                # Update the frame with the newly injected context before pushing
+                # Note: inject_past_context modifies self._context in place
+                frame = LLMContextFrame(self._context)
             
             await self.push_frame(frame, direction)
         else:
+            # Silently pass through non-LLMContextFrame frames (no logging to reduce noise)
             await self.push_frame(frame, direction)
 
     async def _handle_fetch(self, user_message: str) -> bool:
         """Detect past-reference intent, fetch context, and inject into system prompt."""
 
+        logger.info(
+            f"🔍 [DYNAMIC-QUERY] _handle_fetch called for message: '{user_message[:100]}...'"
+        )
+
         # Prevent loops for the same exact message
         msg_hash = hash(user_message)
         if msg_hash in self._processed_queries:
+            logger.debug(
+                f"⏭️  [DYNAMIC-QUERY] Message already processed (hash={msg_hash}), skipping"
+            )
             return False
 
         # 1) Detect intent – MUST be very fast and cheap.
+        logger.info(f"🎯 [DYNAMIC-QUERY] Detecting past-reference intent...")
         intent = detect_past_reference_intent(user_message)
+        logger.info(
+            f"   Intent detection result: has_intent={intent.has_intent}, "
+            f"intent_type={intent.intent_type if intent.has_intent else 'N/A'}, "
+            f"query_text={intent.query_text[:50] if intent.query_text else 'N/A'}..."
+        )
+        
         if not intent.has_intent:
+            logger.debug(
+                f"⏭️  [DYNAMIC-QUERY] No past-reference intent detected - skipping context fetch"
+            )
             return False
 
         self._processed_queries.add(msg_hash)
-        logger.info(f"🎯 PastContextProcessor: Detected intent '{intent.intent_type}'")
+        logger.info(
+            f"✅ [DYNAMIC-QUERY] Detected intent '{intent.intent_type}' - proceeding with context fetch"
+        )
 
         sessions: List[Dict[str, Any]] = []
 
@@ -144,32 +253,96 @@ class PastContextProcessor(FrameProcessor):
                         intent.date_range["end"],
                     )
                 elif intent.intent_type == "topic" and intent.topics:
-                    if settings.ENABLE_SEMANTIC_SEARCH and intent.query_text:
+                    logger.info(
+                        f"🔍 [DYNAMIC-QUERY] Topic intent detected with topics: {intent.topics}"
+                    )
+                    if settings.ENABLE_SEMANTIC_SEARCH and intent.topics:
+                        logger.info(
+                            f"🔍 [DYNAMIC-QUERY] Trying semantic search first for topics: {intent.topics}"
+                        )
+                        # OPTIMIZATION: Construct query from topics instead of full user message
+                        # This improves semantic search relevance for topic queries
+                        # Filter out any stop words that might have slipped through (defense in depth)
+                        stop_words = {
+                            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+                            'we', 'did', 'do', 'what', 'when', 'where', 'how', 'why', 'about', 'regarding', 'concerning',
+                            'related', 'discuss', 'discussed', 'talk', 'talked', 'mention', 'mentioned', 'say', 'said',
+                            'this', 'that', 'these', 'those', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+                            'have', 'has', 'had', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'must'
+                        }
+                        filtered_topics = [t for t in intent.topics if t.lower() not in stop_words and len(t.strip()) > 2]
+                        if not filtered_topics:
+                            # If all topics were filtered out, use original topics as fallback
+                            filtered_topics = [t for t in intent.topics if len(t.strip()) > 2]
+                        
+                        # If we still have no meaningful topics, fall back to using the full query text
+                        # This handles cases where topic extraction fails (e.g., "wait" instead of "zumba classes")
+                        if not filtered_topics or (len(filtered_topics) == 1 and len(filtered_topics[0]) <= 4):
+                            logger.warning(
+                                f"⚠️  [DYNAMIC-QUERY] Topic extraction produced poor results: {filtered_topics}. "
+                                f"Falling back to full query text: '{intent.query_text[:100]}...'"
+                            )
+                            topic_query = intent.query_text.strip()
+                        else:
+                            topic_query = " ".join(filtered_topics)
+                            logger.info(
+                                f"🔍 [DYNAMIC-QUERY] Constructed topic query for semantic search: '{topic_query}' "
+                                f"(from {len(intent.topics)} topics, filtered to {len(filtered_topics)} meaningful topics)"
+                            )
+                        # Use higher limit for semantic search (threshold filters quality)
+                        semantic_limit = getattr(settings, "MAX_SEMANTIC_SEARCH_RESULTS", 5)
+                        # Use lower threshold for topic queries (0.6 vs 0.7) for better recall
+                        topic_threshold = 0.6
+                        logger.info(
+                            f"🔍 [DYNAMIC-QUERY] Using topic-specific threshold: {topic_threshold} "
+                            f"(lower than default {getattr(settings, 'SEMANTIC_SEARCH_THRESHOLD', 0.7)})"
+                        )
                         sessions = await get_sessions_by_semantic_search(
                             self._user_name,
-                            intent.query_text,
-                            limit=settings.MAX_DYNAMIC_SESSIONS,
-                            threshold=getattr(
-                                settings, "SEMANTIC_SEARCH_THRESHOLD", 0.5
-                            ),
+                            topic_query,  # Use topic-based query instead of intent.query_text
+                            limit=semantic_limit,
+                            threshold=topic_threshold,  # Lower threshold for topics
+                            shadow_memory=self._shadow_memory,  # Pass for local search
                         )
+                        if sessions:
+                            logger.info(
+                                f"✅ [DYNAMIC-QUERY] Semantic search found {len(sessions)} sessions for topics: {intent.topics}"
+                            )
+                        else:
+                            logger.info(
+                                f"⚠️  [DYNAMIC-QUERY] Semantic search found no sessions, trying keyword search..."
+                            )
                     if not sessions and intent.topics:
+                        logger.info(
+                            f"🔍 [DYNAMIC-QUERY] Semantic search found no results, trying keyword search for topics: {intent.topics}"
+                        )
                         sessions = await get_sessions_by_topic(
                             self._user_name,
                             intent.topics,
                             limit=settings.MAX_DYNAMIC_SESSIONS,
                         )
+                        if sessions:
+                            logger.info(
+                                f"✅ [DYNAMIC-QUERY] Keyword search SUCCESS: found {len(sessions)} sessions for topics: {intent.topics}"
+                            )
+                        else:
+                            logger.warning(
+                                f"❌ [DYNAMIC-QUERY] Both semantic and keyword search found no sessions for topics: {intent.topics}"
+                            )
                 elif intent.intent_type == "semantic" or (
                     intent.intent_type == "general" and intent.query_text
                 ):
                     if settings.ENABLE_SEMANTIC_SEARCH and intent.query_text:
+                        # Use higher limit for semantic search (threshold filters quality)
+                        semantic_limit = getattr(settings, "MAX_SEMANTIC_SEARCH_RESULTS", 5)
                         sessions = await get_sessions_by_semantic_search(
                             self._user_name,
                             intent.query_text,
-                            limit=settings.MAX_DYNAMIC_SESSIONS,
+                            limit=semantic_limit,
                             threshold=getattr(
                                 settings, "SEMANTIC_SEARCH_THRESHOLD", 0.5
                             ),
+                            shadow_memory=self._shadow_memory,  # Pass for local search
                         )
 
                 # Fallback: if user explicitly asked for history and search found 0,
@@ -205,12 +378,28 @@ class PastContextProcessor(FrameProcessor):
 
             # 4) Inject context if we have sessions.
             if sessions:
+                logger.info(
+                    f"📤 [FLOW-STEP-4] Passing {len(sessions)} sessions to inject_past_context "
+                    f"for prompt injection..."
+                )
+                # Verify sessions have summary text before injection
+                for i, session in enumerate(sessions, 1):
+                    summary = session.get("summary", "")
+                    logger.debug(
+                        f"   Session {i} before injection: "
+                        f"has_summary={'✅' if summary else '❌'}, "
+                        f"summary_len={len(summary)}"
+                    )
                 success = inject_past_context(
                     self._context,
                     sessions,
                     self._user_name,
                     query_text=intent.query_text,
                 )
+                if success:
+                    logger.info(f"✅ [FLOW-STEP-4] inject_past_context returned success=True")
+                else:
+                    logger.warning(f"⚠️  [FLOW-STEP-4] inject_past_context returned success=False")
                 return success
         except Exception as e:
             logger.error(f"Error in PastContextProcessor fetch: {e}")

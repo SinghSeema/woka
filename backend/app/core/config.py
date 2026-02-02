@@ -44,14 +44,23 @@ class Settings(BaseSettings):
 
     # CORS
     CORS_ORIGINS: List[str] = Field(
-        default_factory=lambda: ["http://localhost:5173", "http://localhost:3000"],
+        default_factory=lambda: [
+            "http://localhost:5173", 
+            "http://localhost:3000", 
+            "http://localhost:15173",
+            "https://app.woka.ai"  # Cloudflare frontend URL
+        ],
         description="Allowed CORS origins"
     )
 
     # LiveKit
     LIVEKIT_API_KEY: str = Field(..., description="LiveKit API key")
     LIVEKIT_API_SECRET: str = Field(..., description="LiveKit API secret")
-    LIVEKIT_URL: str = Field(default="ws://127.0.0.1:7880", description="LiveKit WebSocket URL")
+    LIVEKIT_URL: str = Field(default="ws://127.0.0.1:7880", description="LiveKit WebSocket URL (for agent connection)")
+    LIVEKIT_PUBLIC_URL: Optional[str] = Field(
+        default=None, 
+        description="LiveKit public WebSocket URL (for frontend, defaults to LIVEKIT_URL if not set)"
+    )
 
     # External Services
     GROQ_API_KEY: str = Field(..., description="Groq API key for LLM")
@@ -138,7 +147,10 @@ class Settings(BaseSettings):
         default=2, description="Number of sessions to load at startup"
     )
     MAX_DYNAMIC_SESSIONS: int = Field(
-        default=2, description="Max sessions to retrieve dynamically"
+        default=2, description="Max sessions to retrieve dynamically (for date/topic queries)"
+    )
+    MAX_SEMANTIC_SEARCH_RESULTS: int = Field(
+        default=5, description="Max sessions to retrieve for semantic search (higher because threshold filters quality)"
     )
     CONTEXT_CACHE_TTL: int = Field(
         default=300, description="Context cache TTL in seconds"
