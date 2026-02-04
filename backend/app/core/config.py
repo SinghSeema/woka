@@ -178,6 +178,9 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: Optional[str] = Field(
         default=None, description="OpenAI API key for embeddings (optional, falls back to local model)"
     )
+    ENABLE_LLM_TOPIC_FALLBACK: bool = Field(
+        default=True, description="Enable LLM-based topic extraction fallback when keyword extraction returns no topics"
+    )
 
     # Security
     RATE_LIMIT_ENABLED: bool = Field(default=True, description="Enable rate limiting")

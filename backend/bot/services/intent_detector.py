@@ -7,13 +7,25 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+    np = None
+
 backend_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(backend_dir))
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from bot.services.topic_extractor import extract_topics_from_query
 
 logger = get_logger(__name__)
+
+# Cached reference pattern embedding (generated once, lazy-loaded)
+_past_reference_pattern = "what did we discuss or talk about in past conversations or previous sessions"
+_pattern_embedding = None
 
 
 @dataclass
@@ -28,8 +40,44 @@ class PastReferenceIntent:
     confidence: float = 0.0  # 0.0 to 1.0
 
 
-def detect_past_reference_intent(user_message: str) -> PastReferenceIntent:
+async def detect_past_reference_intent(user_message: str) -> PastReferenceIntent:
     """Detect if user message references past conversations.
+    
+    Uses hybrid approach: regex fast path for common patterns, 
+    local embeddings for edge cases and paraphrases.
+    
+    Args:
+        user_message: User's message text
+        
+    Returns:
+        PastReferenceIntent object with detection results
+    """
+    if not user_message or not user_message.strip():
+        return PastReferenceIntent(has_intent=False)
+    
+    # Fast path: Regex for high-confidence patterns (<1ms for 95% of queries)
+    regex_result = _detect_with_regex(user_message)
+    if regex_result.confidence >= 0.85:
+        logger.debug(f"Intent detected via regex fast path: {regex_result.intent_type} (confidence: {regex_result.confidence:.2f})")
+        return regex_result
+    
+    # Semantic path: Local embeddings for edge cases (5-10ms for 5% of queries)
+    if settings.ENABLE_SEMANTIC_SEARCH:
+        try:
+            embedding_result = await _detect_with_embeddings(user_message)
+            if embedding_result and embedding_result.confidence > regex_result.confidence:
+                logger.debug(f"Intent detected via embeddings: {embedding_result.intent_type} (confidence: {embedding_result.confidence:.2f})")
+                return embedding_result
+        except Exception as e:
+            logger.warning(f"Embedding-based intent detection failed, falling back to regex: {e}")
+    
+    # Fallback to regex result
+    logger.debug(f"Intent detected via regex fallback: {regex_result.intent_type} (confidence: {regex_result.confidence:.2f})")
+    return regex_result
+
+
+def _detect_with_regex(user_message: str) -> PastReferenceIntent:
+    """Fast regex-based intent detection for common patterns.
     
     Args:
         user_message: User's message text
@@ -107,8 +155,8 @@ def detect_past_reference_intent(user_message: str) -> PastReferenceIntent:
         intent_type = 'general'
         confidence = 0.6
     
-    # Extract topics
-    topics = _extract_topics(message_lower)
+    # Extract topics using shared topic extractor
+    topics = extract_topics_from_query(user_message)
     
     # Extract date range
     date_range = _extract_date_range(message_lower)
@@ -123,62 +171,137 @@ def detect_past_reference_intent(user_message: str) -> PastReferenceIntent:
     )
 
 
-def _extract_topics(message: str) -> List[str]:
-    """Extract topic keywords from message.
+async def _detect_with_embeddings(query: str) -> Optional[PastReferenceIntent]:
+    """Use local embedding model to detect past reference intent.
+    
+    Uses cosine similarity against a reference pattern embedding.
+    Reuses existing embedding_service.py infrastructure.
     
     Args:
-        message: User message in lowercase
+        query: User's message text
         
     Returns:
-        List of topic keywords
+        PastReferenceIntent if detected, None otherwise
     """
-    # Common wellness topics
-    wellness_topics = [
-        'sleep', 'nutrition', 'diet', 'exercise', 'workout', 'fitness',
-        'stress', 'anxiety', 'mental health', 'meditation', 'mindfulness',
-        'weight', 'health', 'wellness', 'habits', 'routine', 'schedule',
-        'energy', 'mood', 'pain', 'injury', 'recovery', 'illness',
-        'symptoms', 'medicine', 'medication', 'doctor', 'treatment'
-    ]
+    try:
+        from bot.services.embedding_service import generate_embedding
+        
+        # Get reference pattern embedding (cached, generated once)
+        pattern_embedding = await _get_past_reference_pattern_embedding()
+        if not pattern_embedding:
+            logger.debug("Reference pattern embedding not available")
+            return None
+        
+        # Generate query embedding using existing service
+        query_embedding = await generate_embedding(query)
+        if not query_embedding:
+            logger.debug("Failed to generate query embedding")
+            return None
+        
+        # Calculate cosine similarity
+        similarity = _cosine_similarity(query_embedding, pattern_embedding)
+        
+        # Threshold for past reference detection
+        threshold = getattr(settings, 'INTENT_DETECTION_THRESHOLD', 0.65)
+        
+        if similarity >= threshold:
+            # Extract metadata using regex (single source of truth)
+            regex_result = _detect_with_regex(query)
+            if regex_result.has_intent:
+                # Use embedding similarity as confidence, but regex metadata
+                return PastReferenceIntent(
+                    has_intent=True,
+                    intent_type=regex_result.intent_type,
+                    date_range=regex_result.date_range,
+                    topics=regex_result.topics,
+                    query_text=query.strip(),
+                    confidence=similarity  # Use similarity as confidence
+                )
+            else:
+                # Even if regex doesn't match, if embedding similarity is high,
+                # it's likely a past reference query (paraphrase)
+                # Extract basic metadata
+                topics = extract_topics_from_query(query)
+                date_range = _extract_date_range(query.lower())
+                
+                # Determine intent type from metadata
+                intent_type = 'general'
+                if date_range:
+                    intent_type = 'date'
+                elif topics:
+                    intent_type = 'topic'
+                
+                return PastReferenceIntent(
+                    has_intent=True,
+                    intent_type=intent_type,
+                    date_range=date_range,
+                    topics=topics,
+                    query_text=query.strip(),
+                    confidence=similarity
+                )
+        
+        return None
+    except Exception as e:
+        logger.error(f"Error in embedding-based intent detection: {e}", exc_info=True)
+        return None
+
+
+def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+    """Calculate cosine similarity between two vectors.
     
-    found_topics = []
-    for topic in wellness_topics:
-        if topic in message:
-            found_topics.append(topic)
+    Args:
+        vec1: First vector
+        vec2: Second vector
+        
+    Returns:
+        Cosine similarity score (0.0 to 1.0)
+    """
+    try:
+        # Use NumPy if available (faster)
+        if HAS_NUMPY and np:
+            v1 = np.array(vec1)
+            v2 = np.array(vec2)
+            dot_product = np.dot(v1, v2)
+            norm1 = np.linalg.norm(v1)
+            norm2 = np.linalg.norm(v2)
+            if norm1 == 0 or norm2 == 0:
+                return 0.0
+            return float(dot_product / (norm1 * norm2))
+    except Exception:
+        pass
     
-    # Try to extract topic after "about" or "regarding"
-    about_pattern = r'(?:about|regarding|concerning|related to|discuss|talked about|discussed)\s+([a-z\s]+?)(?:\?|\.|$)'
-    match = re.search(about_pattern, message)
-    if match:
-        topic_text = match.group(1).strip()
-        # Extract key words from topic text (words longer than 2 chars)
-        words = topic_text.split()
-        found_topics.extend([w for w in words if len(w) > 2])
+    # Fallback: Manual calculation
+    if len(vec1) != len(vec2):
+        return 0.0
     
-    # Also extract any meaningful words from the query itself (not just after "about")
-    # Look for common question patterns: "what did we discuss [topic]"
-    discuss_pattern = r'(?:discuss|talk|mention|say)\s+(?:about\s+)?([a-z\s]+?)(?:\?|\.|$)'
-    match = re.search(discuss_pattern, message)
-    if match:
-        topic_text = match.group(1).strip()
-        words = topic_text.split()
-        found_topics.extend([w for w in words if len(w) > 2])
+    dot_product = sum(a * b for a, b in zip(vec1, vec2))
+    norm1 = sum(a * a for a in vec1) ** 0.5
+    norm2 = sum(b * b for b in vec2) ** 0.5
     
-    # Remove common stop words (expanded list including "about" and other common words)
-    stop_words = {
-        'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
-        'we', 'did', 'do', 'what', 'when', 'where', 'how', 'why', 'about', 'regarding', 'concerning',
-        'related', 'discuss', 'discussed', 'talk', 'talked', 'mention', 'mentioned', 'say', 'said',
-        'this', 'that', 'these', 'those', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-        'have', 'has', 'had', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'must',
-        'wait', 'waiting', 'just', 'only', 'also', 'too', 'very', 'much', 'more', 'most', 'some',
-        'past', 'previous', 'before', 'ago', 'last', 'time', 'times'
-    }
-    found_topics = [t for t in found_topics if t not in stop_words]
+    if norm1 == 0 or norm2 == 0:
+        return 0.0
     
-    logger.info(f"🔍 [INTENT] Extracted topics: {found_topics} from message: '{message[:100]}'")
+    return dot_product / (norm1 * norm2)
+
+
+async def _get_past_reference_pattern_embedding() -> Optional[List[float]]:
+    """Get or generate the reference pattern embedding (cached).
     
-    return list(set(found_topics))  # Remove duplicates
+    Returns:
+        Reference pattern embedding vector or None
+    """
+    global _pattern_embedding
+    if _pattern_embedding is None:
+        try:
+            from bot.services.embedding_service import generate_embedding
+            _pattern_embedding = await generate_embedding(_past_reference_pattern)
+            if _pattern_embedding:
+                logger.debug(f"Generated reference pattern embedding (dim: {len(_pattern_embedding)})")
+            else:
+                logger.warning("Failed to generate reference pattern embedding")
+        except Exception as e:
+            logger.error(f"Error generating reference pattern embedding: {e}", exc_info=True)
+    return _pattern_embedding
 
 
 def _extract_date_range(message: str) -> Optional[Dict[str, datetime]]:

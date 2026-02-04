@@ -63,12 +63,8 @@ def inject_past_context(
     
     injection_start_time = datetime.now()
     try:
-        # Format sessions into context string
-        logger.info(f"📝 [FLOW-STEP-4] Formatting {len(sessions)} sessions into context text...")
         context_text = _format_sessions_for_injection(sessions, user_name, query_text)
-        logger.info(
-            f"✅ [FLOW-STEP-4] Context text formatted: len={len(context_text)} chars"
-        )
+        logger.debug(f"Formatted {len(sessions)} sessions into context text: {len(context_text)} chars")
         
         # Estimate tokens
         estimated_tokens = estimate_tokens(context_text)
@@ -173,14 +169,20 @@ def _format_sessions_for_injection(
         context_parts.append(
             f"## ADDITIONAL CONTEXT (Retrieved for: \"{query_text}\")\n"
         )
+        context_parts.append(
+            f"**IMPORTANT**: {user_name} asked: \"{query_text}\"\n"
+            f"Focus your answer specifically on what they asked about. "
+            f"Use the past session summaries below ONLY to answer their specific question. "
+            f"Do not provide generic information - be precise and relevant to their query.\n\n"
+        )
     else:
         context_parts.append("## ADDITIONAL CONTEXT (Retrieved Past Sessions)\n")
     
     # Make it explicit how the model should use this information.
     context_parts.append(
         "You have access to the following past session summaries. "
-        "Treat them as ground truth about the user's prior sessions and use them "
-        "to answer the current question.\n\n"
+        "Use them to answer the user's specific question. "
+        "Focus on what the user actually asked about, not generic topics.\n\n"
     )
     
     for i, session in enumerate(sessions, 1):
@@ -215,9 +217,17 @@ def _format_sessions_for_injection(
             context_parts.append(f"Relevance: {similarity:.1%}\n")
         context_parts.append(f"Summary: {summary}\n\n")
     
-    context_parts.append(
-        "Use this information to answer the user's question about past conversations.\n"
-    )
+    if query_text:
+        context_parts.append(
+            f"**Remember**: {user_name} asked: \"{query_text}\"\n"
+            f"Answer their specific question directly. Be precise and relevant. "
+            f"Only reference information from the summaries above that directly relates to their query.\n"
+        )
+    else:
+        context_parts.append(
+            "Use this information to answer the user's question about past conversations. "
+            "Focus on what they specifically asked about.\n"
+        )
     
     return "".join(context_parts)
 

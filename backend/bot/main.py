@@ -7,6 +7,12 @@ from pathlib import Path
 import asyncio
 from datetime import datetime
 
+# Suppress verbose logs from sentence-transformers and Hugging Face
+# Set BEFORE any imports to ensure they're effective
+os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 # Add backend directory to Python path
 backend_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(backend_dir))

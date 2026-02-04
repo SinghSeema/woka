@@ -2,13 +2,18 @@
 
 import sys
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 backend_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(backend_dir))
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from bot.services.topic_extractor import (
+    extract_topics_from_user_messages,
+    extract_topics_from_user_messages_hybrid
+)
+from bot.services.llm_topic_extractor import consolidate_topics
 
 logger = get_logger(__name__)
 
@@ -16,16 +21,18 @@ logger = get_logger(__name__)
 async def generate_session_summary(
     transcript: List[Dict[str, Any]], user_name: str, duration_seconds: float,
     performance_monitor=None, room_name: str = ""
-) -> str:
-    """Generate LLM-based session summary optimized for agentic memory context.
+) -> Tuple[str, List[str]]:
+    """Generate LLM-based session summary and extract topics.
 
     Args:
         transcript: List of message dictionaries with role and content
         user_name: User's name
         duration_seconds: Session duration in seconds
+        performance_monitor: Optional performance monitor for tracking
+        room_name: Optional room name for tracking
 
     Returns:
-        Comprehensive summary text optimized for future session context
+        Tuple of (summary_text, topics_list) where topics_list is extracted from summary
     """
     try:
         # Filter out system messages and format transcript
@@ -36,8 +43,14 @@ async def generate_session_summary(
         ]
 
         if len(conversation) < 2:
-            logger.warning("Not enough messages for summary generation")
-            return _generate_basic_summary(user_name, duration_seconds)
+            summary = _generate_basic_summary(user_name, duration_seconds)
+            # Extract topics from user messages only (not from summary)
+            # Use hybrid extraction (keyword + LLM fallback if enabled)
+            user_messages = [msg.get("content", "") for msg in transcript if msg.get("role") == "user"]
+            extracted_topics = await extract_topics_from_user_messages_hybrid(user_messages)
+            # Consolidate to 3-5 topics for cleaner storage
+            topics = await consolidate_topics(extracted_topics, max_topics=5)
+            return summary, topics
 
         # Use more messages for better context (last 30 messages or all if less)
         conversation_text = "\n".join(conversation[-30:]) if len(conversation) > 30 else "\n".join(conversation)
@@ -95,35 +108,82 @@ Comprehensive summary:"""
                 
                 # Extract token usage if available and track it
                 usage = result.get("usage", {})
-                if usage:
-                    input_tokens = usage.get("prompt_tokens", 0)
-                    output_tokens = usage.get("completion_tokens", 0)
-                    logger.debug(
-                        f"Summary generation tokens: input={input_tokens}, output={output_tokens}"
+                if usage and performance_monitor and room_name:
+                    performance_monitor.record_request(
+                        user_name=user_name,
+                        room_name=room_name,
+                        request_type='llm_summary',
+                        duration_ms=0,
+                        input_tokens=usage.get("prompt_tokens", 0),
+                        output_tokens=usage.get("completion_tokens", 0),
+                        success=True
                     )
-                    
-                    # Track in performance monitor if available
-                    if performance_monitor and room_name:
-                        performance_monitor.record_request(
-                            user_name=user_name,
-                            room_name=room_name,
-                            request_type='llm_summary',
-                            duration_ms=0,
-                            input_tokens=input_tokens,
-                            output_tokens=output_tokens,
-                            success=True
-                        )
                 
-                logger.info(f"Generated LLM summary for {user_name}: {len(summary)} chars")
-                return summary
+                # Extract topics from USER MESSAGES ONLY (not from summary or assistant responses)
+                # Use hybrid extraction (keyword + LLM fallback if enabled)
+                user_messages = [msg.get("content", "") for msg in transcript if msg.get("role") == "user"]
+                extracted_topics = await extract_topics_from_user_messages_hybrid(user_messages)
+                # Ensure topics is always a list (never None)
+                if extracted_topics is None:
+                    extracted_topics = []
+                
+                # Consolidate topics to 3-5 high-level topics for cleaner storage
+                # This prevents verbose topic lists while maintaining semantic search capability
+                topics = await consolidate_topics(extracted_topics, max_topics=5)
+                
+                logger.info(
+                    f"✅ [SESSION STORAGE] Summary: {len(summary)} chars | "
+                    f"Topics: {len(extracted_topics)} extracted → {len(topics)} consolidated: {topics}"
+                )
+                
+                return summary, topics
 
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                f"❌ [SESSION SUMMARY] HTTP error {e.response.status_code} | "
+                f"Response: {e.response.text[:200] if hasattr(e.response, 'text') else 'N/A'}"
+            )
+            summary = _generate_basic_summary(user_name, duration_seconds)
+            user_messages = [msg.get("content", "") for msg in transcript if msg.get("role") == "user"]
+            extracted_topics = await extract_topics_from_user_messages_hybrid(user_messages)
+            if extracted_topics is None:
+                extracted_topics = []
+            topics = await consolidate_topics(extracted_topics, max_topics=5)
+            return summary, topics
+        except httpx.TimeoutException:
+            logger.warning("⚠️  [SESSION SUMMARY] Request timeout, using basic summary")
+            summary = _generate_basic_summary(user_name, duration_seconds)
+            user_messages = [msg.get("content", "") for msg in transcript if msg.get("role") == "user"]
+            extracted_topics = await extract_topics_from_user_messages_hybrid(user_messages)
+            if extracted_topics is None:
+                extracted_topics = []
+            topics = await consolidate_topics(extracted_topics, max_topics=5)
+            return summary, topics
         except Exception as e:
-            logger.error(f"Error calling Groq API for summary: {e}", exc_info=True)
-            return _generate_basic_summary(user_name, duration_seconds)
+            logger.error(
+                f"❌ [SESSION SUMMARY] Error: {type(e).__name__}: {e}",
+                exc_info=True
+            )
+            summary = _generate_basic_summary(user_name, duration_seconds)
+            user_messages = [msg.get("content", "") for msg in transcript if msg.get("role") == "user"]
+            extracted_topics = await extract_topics_from_user_messages_hybrid(user_messages)
+            if extracted_topics is None:
+                extracted_topics = []
+            topics = await consolidate_topics(extracted_topics, max_topics=5)
+            return summary, topics
 
     except Exception as e:
-        logger.error(f"Error generating session summary: {e}", exc_info=True)
-        return _generate_basic_summary(user_name, duration_seconds)
+        logger.error(
+            f"❌ [SESSION SUMMARY] Unexpected error: {type(e).__name__}: {e}",
+            exc_info=True
+        )
+        summary = _generate_basic_summary(user_name, duration_seconds)
+        user_messages = [msg.get("content", "") for msg in transcript if msg.get("role") == "user"]
+        extracted_topics = await extract_topics_from_user_messages_hybrid(user_messages)
+        if extracted_topics is None:
+            extracted_topics = []
+        topics = await consolidate_topics(extracted_topics, max_topics=5)
+        return summary, topics
 
 
 def _generate_basic_summary(user_name: str, duration_seconds: float) -> str:

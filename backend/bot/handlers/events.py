@@ -150,8 +150,8 @@ async def setup_event_handlers(
 
             logger.info(f"Generating summary for {len(transcript)} messages, duration: {duration:.1f}s")
             
-            # Generate summary (pass performance monitor to track tokens)
-            summary = await generate_session_summary(
+            # Generate summary and extract topics (pass performance monitor to track tokens)
+            summary, topics = await generate_session_summary(
                 transcript, user_name, duration,
                 performance_monitor=performance_monitor,
                 room_name=room_name
@@ -162,12 +162,17 @@ async def setup_event_handlers(
                 return
             
             logger.info(f"Generated summary ({len(summary)} chars): {summary[:100]}...")
+            if topics:
+                logger.info(f"Extracted {len(topics)} topics: {topics}")
+            else:
+                logger.warning(f"No topics extracted from session (topics={topics})")
 
-            # Save to database
+            # Save to database with topics
             success = await save_session_summary(
                 user_name=user_name,
                 room_name=room_name,
                 summary=summary,
+                topics=topics,
                 duration_seconds=duration,
                 message_count=message_count,
             )

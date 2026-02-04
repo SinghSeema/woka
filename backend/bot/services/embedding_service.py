@@ -63,13 +63,12 @@ async def generate_embedding(text: str, use_cache: bool = True) -> Optional[List
         )
 
         if not use_local:
-            logger.debug("Attempting OpenAI embedding generation")
             embedding = await _generate_openai_embedding(text)
             if embedding:
                 if use_cache and _embedding_cache:
                     _embedding_cache.set_embedding(text, embedding)
                 return embedding
-            logger.info("OpenAI embedding failed, falling back to local model")
+            logger.debug("OpenAI embedding failed, falling back to local model")
         
         # Use local model
         embedding = await _generate_local_embedding(text)
@@ -144,24 +143,69 @@ async def _generate_local_embedding(text: str) -> Optional[List[float]]:
     global _embedding_model
     
     try:
-        from sentence_transformers import SentenceTransformer
+        import os
         import asyncio
+        import logging
+        
+        # Set environment variables BEFORE importing to suppress progress bars
+        os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+        os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
+        
+        # Temporarily suppress sentence-transformers and transformers logs
+        st_logger = logging.getLogger("sentence_transformers")
+        tf_logger = logging.getLogger("transformers")
+        hf_logger = logging.getLogger("huggingface_hub")
+        filelock_logger = logging.getLogger("filelock")
+        
+        original_st_level = st_logger.level
+        original_tf_level = tf_logger.level
+        original_hf_level = hf_logger.level
+        original_filelock_level = filelock_logger.level
+        
+        st_logger.setLevel(logging.ERROR)
+        tf_logger.setLevel(logging.ERROR)
+        hf_logger.setLevel(logging.ERROR)
+        filelock_logger.setLevel(logging.ERROR)
+        
+        # Import after setting environment variables
+        from sentence_transformers import SentenceTransformer
         
         # Load model if not already loaded (RUN IN THREAD to avoid blocking loop)
         if _embedding_model is None:
             model_name = getattr(settings, 'LOCAL_EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
-            logger.info(f"🔄 Loading local embedding model: {model_name}...")
+            logger.debug(f"Loading local embedding model: {model_name}...")
             
             def load_model():
-                return SentenceTransformer(model_name)
+                # Ensure environment variables are set in thread
+                os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+                os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+                os.environ["TOKENIZERS_PARALLELISM"] = "false"
+                
+                # Suppress logs in thread as well
+                logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
+                logging.getLogger("transformers").setLevel(logging.ERROR)
+                logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+                logging.getLogger("filelock").setLevel(logging.ERROR)
+                
+                # Try to disable progress bar, fallback if parameter not supported
+                try:
+                    return SentenceTransformer(model_name, show_progress_bar=False)
+                except TypeError:
+                    return SentenceTransformer(model_name)
             
             try:
-                # Use to_thread for Python 3.9+ or run_in_executor for older
                 _embedding_model = await asyncio.to_thread(load_model)
-                logger.info(f"✅ Local embedding model '{model_name}' loaded.")
+                logger.debug(f"Local embedding model '{model_name}' loaded")
             except Exception as load_error:
                 logger.error(f"❌ Failed to load embedding model: {load_error}")
                 return None
+            finally:
+                # Restore original log levels
+                st_logger.setLevel(original_st_level)
+                tf_logger.setLevel(original_tf_level)
+                hf_logger.setLevel(original_hf_level)
+                filelock_logger.setLevel(original_filelock_level)
         
         if _embedding_model is None:
             return None

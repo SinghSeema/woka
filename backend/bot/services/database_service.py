@@ -135,234 +135,104 @@ async def search_cached_embeddings(
         List of matching sessions with similarity scores
     """
     if not query_embedding or not cached_embeddings:
-        logger.warning(
-            f"⚠️  [FLOW-STEP-2] Cannot search: query_embedding={bool(query_embedding)}, "
-            f"cached_embeddings={len(cached_embeddings) if cached_embeddings else 0}"
-        )
+        logger.debug(f"Cannot search: query_embedding={bool(query_embedding)}, cached_embeddings={len(cached_embeddings) if cached_embeddings else 0}")
         return []
     
     try:
-        # DIAGNOSTIC: Check query embedding format
-        query_embedding_type = type(query_embedding).__name__
         query_embedding_dim = len(query_embedding) if query_embedding else 0
-        query_embedding_sample = query_embedding[:3] if query_embedding and len(query_embedding) >= 3 else []
         
-        # DIAGNOSTIC: Check query embedding norm (should be ~1.0 if normalized)
-        import numpy as np
-        query_norm = np.linalg.norm(np.array(query_embedding)) if HAS_NUMPY and query_embedding else 0.0
-        query_mean = np.mean(np.array(query_embedding)) if HAS_NUMPY and query_embedding else 0.0
-        query_std = np.std(np.array(query_embedding)) if HAS_NUMPY and query_embedding else 0.0
-        
-        logger.info(
-            f"🔍 [FLOW-STEP-2] Starting similarity search: "
-            f"query_embedding_dim={query_embedding_dim}, "
-            f"query_embedding_type={query_embedding_type}, "
-            f"query_norm={query_norm:.3f} (should be ~1.0 if normalized), "
-            f"query_mean={query_mean:.4f}, query_std={query_std:.4f}, "
-            f"cached_embeddings_count={len(cached_embeddings)}, "
-            f"threshold={threshold}"
-        )
-        
-        # Step 1: Calculate similarities and find matches
+        # Calculate similarities and find matches
         matches = []
-        all_similarities = []  # Track all similarities for diagnostics
+        all_similarities = []
         
         for i, item in enumerate(cached_embeddings, 1):
             summary = item.get("summary", "").strip()
             embedding = item.get("embedding")
             
             if not summary or not embedding:
-                logger.debug(f"   Skipping item {i}: missing summary or embedding")
                 continue
-            
-            # DIAGNOSTIC: Check stored embedding format
-            embedding_type = type(embedding).__name__
             
             # Convert embedding to List[float] if needed (should already be parsed, but handle edge cases)
             if isinstance(embedding, str):
-                logger.warning(
-                    f"   ⚠️  Item {i}: Embedding is still a string (should have been parsed during fetch). "
-                    f"Parsing now (len={len(embedding)})..."
-                )
+                logger.debug(f"Item {i}: Parsing string embedding (should have been parsed during fetch)")
                 try:
-                    # Supabase pgvector might return as string like "[0.1,0.2,0.3]" or JSON
                     import json
-                    # Try JSON first
                     try:
                         embedding = json.loads(embedding)
-                        logger.info(f"   ✅ Item {i}: Parsed as JSON, dim={len(embedding) if isinstance(embedding, list) else 'N/A'}")
                     except json.JSONDecodeError:
-                        # If not JSON, might be Python list string representation
-                        # Remove brackets and split by comma
                         embedding_str = embedding.strip('[]')
-                        # Count commas to estimate dimension
-                        comma_count = embedding_str.count(',')
                         embedding = [float(x.strip()) for x in embedding_str.split(',') if x.strip()]
-                        logger.info(f"   ✅ Item {i}: Parsed as comma-separated list, dim={len(embedding)} (comma_count={comma_count})")
                     
-                    # Verify it's now a list of floats
                     if not isinstance(embedding, list) or len(embedding) == 0:
-                        raise ValueError(f"Parsed embedding is not a valid list: {type(embedding)}, len={len(embedding) if hasattr(embedding, '__len__') else 'N/A'}")
+                        raise ValueError(f"Parsed embedding is not a valid list")
                     
-                    # Verify dimension is reasonable (should be 384 for local model)
                     if len(embedding) != 384 and len(embedding) != 1536:
-                        logger.warning(
-                            f"   ⚠️  Item {i}: Parsed embedding has unexpected dimension: {len(embedding)} "
-                            f"(expected 384 or 1536). This might indicate a parsing issue."
-                        )
+                        logger.warning(f"Item {i}: Unexpected embedding dimension: {len(embedding)}")
                 except Exception as e:
-                    logger.error(
-                        f"   ❌ Item {i}: Failed to parse embedding string: {e}, "
-                        f"embedding_preview={str(embedding)[:200]}"
-                    )
+                    logger.error(f"Item {i}: Failed to parse embedding: {e}")
                     continue
             elif not isinstance(embedding, (list, tuple)):
-                logger.warning(
-                    f"   ⚠️  Item {i}: Unexpected embedding type: {embedding_type}, "
-                    f"attempting to convert to list..."
-                )
                 try:
                     embedding = list(embedding) if hasattr(embedding, '__iter__') else None
                     if embedding is None:
-                        logger.error(f"   ❌ Item {i}: Cannot convert embedding to list")
                         continue
                 except Exception as e:
-                    logger.error(f"   ❌ Item {i}: Failed to convert embedding: {e}")
+                    logger.error(f"Item {i}: Failed to convert embedding: {e}")
                     continue
             
-            # Calculate dimension AFTER parsing/conversion
             embedding_dim = len(embedding) if embedding else 0
             
-            # Verify dimensions match
             if embedding_dim != query_embedding_dim:
-                logger.warning(
-                    f"   ⚠️  Item {i}: Dimension mismatch! "
-                    f"query_dim={query_embedding_dim}, stored_dim={embedding_dim}, "
-                    f"skipping this embedding"
-                )
+                logger.debug(f"Item {i}: Dimension mismatch (query={query_embedding_dim}, stored={embedding_dim}), skipping")
                 continue
             
-            # DIAGNOSTIC: Log embedding sample for first item
-            if i == 1:
-                embedding_sample = embedding[:3] if len(embedding) >= 3 else []
-                logger.info(
-                    f"   🔬 [DIAGNOSTIC] First cached embedding: "
-                    f"type={embedding_type}, dim={embedding_dim}, "
-                    f"sample={embedding_sample}, summary_len={len(summary)}"
-                )
-            
-            # DIAGNOSTIC: Check vector norms (should be ~1.0 if normalized)
-            import numpy as np
-            query_norm = np.linalg.norm(np.array(query_embedding)) if HAS_NUMPY else sum(x*x for x in query_embedding)**0.5
-            stored_norm = np.linalg.norm(np.array(embedding)) if HAS_NUMPY else sum(x*x for x in embedding)**0.5
-            
-            # DIAGNOSTIC: Check embedding statistics
-            query_mean = np.mean(np.array(query_embedding)) if HAS_NUMPY else sum(query_embedding) / len(query_embedding)
-            query_std = np.std(np.array(query_embedding)) if HAS_NUMPY else 0.0
-            stored_mean = np.mean(np.array(embedding)) if HAS_NUMPY else sum(embedding) / len(embedding)
-            stored_std = np.std(np.array(embedding)) if HAS_NUMPY else 0.0
-            
-            # Calculate cosine similarity
             similarity = cosine_similarity(query_embedding, embedding)
-            all_similarities.append(similarity)  # Track for diagnostics
+            all_similarities.append(similarity)
             
-            # Log ALL similarity scores at INFO level to diagnose threshold issues
-            summary_preview = summary[:100].replace("\n", " ").replace("\r", " ")
-            
-            # Log detailed diagnostics for first item or if similarity is interesting
-            if i == 1 or similarity > 0.3:
-                logger.info(
-                    f"   📊 Item {i}/{len(cached_embeddings)}: similarity={similarity:.3f}, "
-                    f"threshold={threshold}, match={'✅' if similarity >= threshold else '❌'}"
-                )
-                logger.info(
-                    f"      🔬 [DIAGNOSTIC] Vector norms: query={query_norm:.3f}, stored={stored_norm:.3f} "
-                    f"(should be ~1.0 if normalized)"
-                )
-                logger.info(
-                    f"      🔬 [DIAGNOSTIC] Embedding stats: "
-                    f"query_mean={query_mean:.4f}, query_std={query_std:.4f}, "
-                    f"stored_mean={stored_mean:.4f}, stored_std={stored_std:.4f}"
-                )
-                logger.info(
-                    f"      📝 Summary preview: '{summary_preview}...'"
-                )
-            else:
-                # Less verbose for low similarity items
-                logger.debug(
-                    f"   📊 Item {i}/{len(cached_embeddings)}: similarity={similarity:.3f} "
-                    f"(below threshold {threshold})"
-                )
+            # Log cosine similarity score for each item (INFO level)
+            summary_preview = summary[:80] + "..." if len(summary) > 80 else summary
+            is_match = similarity >= threshold
+            match_status = "✅ MATCHING" if is_match else "❌ NOT MATCHING"
+            diff_from_threshold = similarity - threshold
+            logger.info(
+                f"🔍 [COSINE SIMILARITY] Score: {similarity:.4f} | Threshold: {threshold:.4f} | "
+                f"Diff: {diff_from_threshold:+.4f} | Status: {match_status} | "
+                f"Summary: '{summary_preview}'"
+            )
             
             if similarity >= threshold:
                 matches.append({
                     "summary": summary,
                     "similarity": similarity,
-                    "embedding": embedding  # Keep for reference
+                    "embedding": embedding
                 })
-                logger.info(
-                    f"   ✅ Match {len(matches)}: similarity={similarity:.3f}, "
-                    f"summary_preview='{summary[:80].replace(chr(10), ' ')}...'"
-                )
         
         # Sort by similarity (highest first)
         matches.sort(key=lambda x: x["similarity"], reverse=True)
         matches = matches[:limit]
         
-        # Calculate max similarity for diagnostic purposes (even if below threshold)
         max_similarity = max(all_similarities) if all_similarities else 0.0
-        
-        logger.info(
-            f"📊 [FLOW-STEP-2] Similarity search complete: "
-            f"found {len(matches)} matches above threshold {threshold}, "
-            f"max_similarity={max_similarity:.3f} (across all {len(cached_embeddings)} cached embeddings)"
-        )
+        min_similarity = min(all_similarities) if all_similarities else 0.0
+        avg_similarity = sum(all_similarities) / len(all_similarities) if all_similarities else 0.0
         
         if not matches:
-            # DIAGNOSTIC: Analyze why similarity is low
-            query_word_count = len(query_text.split()) if query_text else 0
-            avg_summary_length = sum(len(item.get("summary", "")) for item in cached_embeddings) / len(cached_embeddings) if cached_embeddings else 0
-            
-            logger.warning(
-                f"⚠️  [FLOW-STEP-2] No matches found above threshold {threshold}. "
-                f"Highest similarity was {max_similarity:.3f}."
+            logger.info(
+                f"❌ [SEMANTIC SEARCH] No matches found above threshold {threshold:.4f} | "
+                f"Stats: max={max_similarity:.4f}, min={min_similarity:.4f}, avg={avg_similarity:.4f} | "
+                f"Checked {len(all_similarities)} embeddings | All scores below threshold"
             )
-            if query_text:
-                logger.info(
-                    f"   🔬 [DIAGNOSTIC] Query analysis: "
-                    f"query_text='{query_text[:50]}...', query_word_count={query_word_count}, "
-                    f"avg_summary_length={avg_summary_length:.0f} chars"
-                )
-                if query_word_count <= 2:
-                    logger.warning(
-                        f"   ⚠️  [ROOT CAUSE] Query is very short ({query_word_count} words). "
-                        f"Single-word queries have sparse embeddings that don't match well with full summary embeddings. "
-                        f"Consider: (1) expanding query (e.g., 'singing' → 'singing classes discussion'), "
-                        f"(2) lowering threshold to {max(0.3, max_similarity - 0.1):.2f}, or (3) using keyword search."
-                    )
-                else:
-                    logger.warning(
-                        f"   ⚠️  [ROOT CAUSE] Low similarity despite reasonable query length. "
-                        f"Possible issues: (1) embeddings not normalized, (2) different models used, "
-                        f"(3) semantic mismatch. Consider lowering threshold or using keyword search."
-                    )
-            else:
-                logger.warning(
-                    f"   ⚠️  [ROOT CAUSE] Low similarity. "
-                    f"avg_summary_length={avg_summary_length:.0f} chars. "
-                    f"Possible issues: (1) embeddings not normalized, (2) different models used, "
-                    f"(3) semantic mismatch. Consider lowering threshold or using keyword search."
-                )
             return []
         
-        logger.info(f"✅ [FLOW-STEP-2] Found {len(matches)} matches, extracting summary text...")
-        for i, match in enumerate(matches, 1):
-            summary = match.get("summary", "")
-            similarity = match.get("similarity", 0.0)
+        logger.info(
+            f"✅ [SEMANTIC SEARCH] Found {len(matches)} matches above threshold {threshold:.4f} | "
+            f"Max similarity: {max_similarity:.4f} | Checked {len(all_similarities)} embeddings"
+        )
+        
+        # Log top matches with scores
+        for i, match in enumerate(matches[:3], 1):  # Log top 3 matches
             logger.info(
-                f"   Match {i}: similarity={similarity:.3f}, "
-                f"summary_len={len(summary)}, "
-                f"summary_preview='{summary[:100].replace(chr(10), ' ')}...'"
+                f"  📊 [TOP MATCH {i}] Cosine similarity: {match['similarity']:.4f} | "
+                f"Summary: '{match['summary'][:80]}...'"
             )
         
         # Step 2: Fetch full session data for matches (if user_name provided)
@@ -389,44 +259,22 @@ async def search_cached_embeddings(
                             break
                 
                 if results:
-                    logger.info(
-                        f"✅ Local embedding search found {len(results)} matches "
-                        f"(threshold: {threshold}, from cache, full data fetched)"
-                    )
+                    logger.debug(f"Local embedding search found {len(results)} matches (from cache)")
                     return results
             except Exception as e:
                 logger.debug(f"Error fetching full session data for local matches: {e}")
-                # Fall through to return matches with summary only
         
-        # Step 3: Return matches with summary only (if full fetch failed or not requested)
-        logger.info(
-            f"📝 [FLOW-STEP-3] Extracting summary text from {len(matches)} matches..."
-        )
+        # Return matches with summary only
         results = []
         for m in matches:
-            summary_text = m["summary"]  # Extract summary text
-            logger.debug(
-                f"   Extracting summary: len={len(summary_text)}, "
-                f"preview='{summary_text[:80].replace(chr(10), ' ')}...'"
-            )
             results.append({
-                "summary": summary_text,  # ← Summary text for prompt injection
+                "summary": m["summary"],
                 "similarity": m["similarity"],
                 "cached": True,
-                "created_at": None,  # Will default to "recent" in formatter
+                "created_at": None,
                 "duration_seconds": 0,
                 "message_count": 0
             })
-        
-        if results:
-            logger.info(
-                f"✅ [FLOW-STEP-3] Extracted {len(results)} summary texts ready for prompt injection"
-            )
-            for i, result in enumerate(results, 1):
-                logger.info(
-                    f"   Result {i}: summary_len={len(result['summary'])}, "
-                    f"similarity={result['similarity']:.3f}"
-                )
         
         return results
         
@@ -441,6 +289,7 @@ async def save_session_summary(
     summary: str,
     duration_seconds: float,
     message_count: int,
+    topics: List[str] = None,
 ) -> bool:
     """Save session summary to Supabase.
 
@@ -450,12 +299,11 @@ async def save_session_summary(
         summary: Session summary text
         duration_seconds: Session duration
         message_count: Number of messages
+        topics: Optional list of topics extracted from summary
 
     Returns:
         True if saved successfully, False otherwise
     """
-    logger.info(f"save_session_summary called: user={user_name}, room={room_name}, SUPABASE_ENABLED={settings.SUPABASE_ENABLED}")
-    
     if not settings.SUPABASE_ENABLED:
         logger.warning("❌ Supabase disabled in settings, skipping session save")
         return False
@@ -483,6 +331,7 @@ async def save_session_summary(
         embedding = None
         if settings.ENABLE_SEMANTIC_SEARCH:
             # Generate embedding for session summary (no verbose logging of vector contents)
+            # Uses pre-loaded SentenceTransformer model (all-MiniLM-L6-v2)
             try:
                 embedding = await generate_embedding(summary.strip())
                 if embedding:
@@ -495,12 +344,20 @@ async def save_session_summary(
                             f"Saving without embedding to avoid error."
                         )
                         embedding = None
+                    else:
+                        # Log which model generated the embedding (for debugging, not stored in DB)
+                        embedding_model = _get_current_embedding_model()
+                        if embedding_model:
+                            logger.debug(
+                                f"✅ Embedding generated using model: {embedding_model} "
+                                f"(dimension: {actual_dim}, pre-loaded SentenceTransformer)"
+                            )
                 else:
                     logger.warning("⚠️  Failed to generate embedding, saving without embedding")
             except Exception as e:
                 logger.error(f"❌ Error generating embedding: {e}, saving without embedding", exc_info=True)
 
-        # Match the schema: room_name, user_name, summary, duration_seconds, message_count, embedding
+        # Match the schema: room_name, user_name, summary, duration_seconds, message_count, embedding, topics
         # created_at and updated_at are auto-managed by the database
         data = {
             "room_name": room_name,
@@ -511,34 +368,60 @@ async def save_session_summary(
             # created_at and updated_at are handled by database defaults and triggers
         }
         
+        # Add topics if provided (even if empty list, store it)
+        # Ensure topics is a list (not None)
+        if topics is None:
+            topics = []
+        
+        if topics:
+            data["topics"] = topics
+        else:
+            # Store empty array instead of None
+            data["topics"] = []
+        
         # Add embedding if available (do not log full embedding contents)
         if embedding:
             data["embedding"] = embedding
+            # Note: embedding_model is NOT stored in database - it's always the pre-loaded
+            # SentenceTransformer model (all-MiniLM-L6-v2) as configured in settings
 
-        # ALSO cache embedding in embedding cache (optimization)
+        # Cache embedding in embedding cache (optimization)
         from bot.services.embedding_service import _embedding_cache
         if _embedding_cache and embedding:
             _embedding_cache.set_embedding(summary.strip(), embedding)
-            logger.debug(f"✅ Cached embedding for session summary ({len(summary)} chars)")
 
-        # Log only high-level info, not full payload/embedding
-        logger.info(
-            f"Inserting session summary into 'sessions' table "
-            f"(user={normalized_name}, room={room_name}, duration={int(duration_seconds)}s, messages={message_count}, "
-            f"has_embedding={bool(embedding)})"
-        )
-        result = client.table("sessions").insert(data).execute()
+        
+        try:
+            result = client.table("sessions").insert(data).execute()
+        except Exception as insert_error:
+            error_str = str(insert_error).lower()
+            
+            # Check if error is about missing topics column
+            if "column" in error_str and "topics" in error_str:
+                logger.error(
+                    "❌ Topics column may not exist in database. "
+                    "Please run migration: docs/migrations/add_topics_column.sql"
+                )
+                raise
+            
+            # Other errors
+            else:
+                logger.error(
+                    f"❌ Database insert error for {user_name}: {insert_error}",
+                    exc_info=True
+                )
+                raise
         
         if result.data:
             logger.info(
-                f"✅ Successfully saved session summary to Supabase for {user_name} "
-                f"(room: {room_name}, duration: {int(duration_seconds)}s, messages: {message_count})"
+                f"✅ [SESSION SAVED] User: {user_name} | Room: {room_name} | "
+                f"Topics: {len(topics) if topics else 0} | Duration: {int(duration_seconds)}s"
             )
-            logger.info(f"   Inserted record ID: {result.data[0].get('id', 'unknown')}")
             return True
         else:
-            logger.error(f"❌ Session summary insert returned no data for {user_name}")
-            logger.error(f"   Response: {result}")
+            logger.error(
+                f"❌ [SESSION SAVE] Insert returned no data | User: {user_name} | Room: {room_name}"
+            )
             return False
 
     except Exception as e:
@@ -588,30 +471,9 @@ async def get_past_sessions(user_name: str, limit: int = 2) -> List[Dict[str, An
         sessions = result.data if result.data else []
         
         if sessions:
-            logger.info(
-                f"✅ Retrieved {len(sessions)} past sessions for {user_name} "
-                f"(requested: {limit})"
-            )
-            # Log details of retrieved sessions (high level only)
-            for i, session in enumerate(sessions[:3], 1):  # Log first 3
-                summary = session.get("summary", "")
-                created_at = session.get("created_at", "")
-                room_name = session.get("room_name", "unknown")
-                date_str = created_at[:10] if created_at and len(created_at) >= 10 else "unknown"
-                logger.info(
-                    f"   Session {i}: {date_str} (room: {room_name}, "
-                    f"summary: {len(summary)} chars)"
-                )
-            # Debug-level previews of summaries fetched from Supabase
-            for i, s in enumerate(sessions[:3], 1):
-                raw_summary = (s.get("summary", "") or "")
-                summary_preview = raw_summary[:300].replace("\n", " ")
-                logger.debug(
-                    f"[past-context] Fetched past_session {i} summary preview "
-                    f"(len={len(raw_summary)}): {summary_preview}"
-                )
+            logger.debug(f"Retrieved {len(sessions)} past sessions for {user_name} (requested: {limit})")
         else:
-            logger.info(f"ℹ️  No past sessions found for {user_name} - new user or no history")
+            logger.debug(f"No past sessions found for {user_name}")
         
         return sessions
 
@@ -664,19 +526,13 @@ async def get_past_session_embeddings(user_name: str, limit: int = 3) -> List[Di
         embeddings_data = result.data if result.data else []
         
         if embeddings_data:
-            logger.info(
-                f"✅ Retrieved {len(embeddings_data)} session embeddings for {user_name} "
-                f"(for embedding cache pre-warm)"
-            )
-            # OPTIMIZATION: Parse embeddings once here (store as lists, not strings)
-            # This prevents having to parse them on every similarity search
+            logger.debug(f"Retrieved {len(embeddings_data)} session embeddings for {user_name}")
+            # Parse embeddings once here (store as lists, not strings)
             parsed_count = 0
             for i, item in enumerate(embeddings_data):
                 embedding = item.get("embedding")
-                summary = item.get("summary", "")
                 
                 if embedding:
-                    # Parse string embeddings to lists once
                     if isinstance(embedding, str):
                         try:
                             import json
@@ -684,36 +540,18 @@ async def get_past_session_embeddings(user_name: str, limit: int = 3) -> List[Di
                                 embedding = json.loads(embedding)
                                 parsed_count += 1
                             except json.JSONDecodeError:
-                                # If not JSON, might be Python list string representation
                                 embedding_str = embedding.strip('[]')
                                 embedding = [float(x.strip()) for x in embedding_str.split(',') if x.strip()]
                                 parsed_count += 1
                             
-                            # Verify it's now a list of floats
                             if isinstance(embedding, list) and len(embedding) > 0:
-                                # Update the item with parsed embedding
                                 item["embedding"] = embedding
-                                logger.debug(
-                                    f"   ✅ Parsed embedding {i+1}: dim={len(embedding)}, "
-                                    f"summary_len={len(summary)}"
-                                )
                             else:
-                                logger.warning(
-                                    f"   ⚠️  Embedding {i+1}: Parsed but invalid format, "
-                                    f"removing from cache"
-                                )
                                 item["embedding"] = None
                         except Exception as e:
-                            logger.warning(
-                                f"   ⚠️  Embedding {i+1}: Failed to parse: {e}, "
-                                f"removing from cache"
-                            )
+                            logger.debug(f"Embedding {i+1}: Failed to parse: {e}")
                             item["embedding"] = None
                     elif not isinstance(embedding, (list, tuple)):
-                        logger.warning(
-                            f"   ⚠️  Embedding {i+1}: Unexpected type {type(embedding).__name__}, "
-                            f"attempting conversion"
-                        )
                         try:
                             embedding = list(embedding) if hasattr(embedding, '__iter__') else None
                             if embedding:
@@ -721,31 +559,13 @@ async def get_past_session_embeddings(user_name: str, limit: int = 3) -> List[Di
                             else:
                                 item["embedding"] = None
                         except Exception as e:
-                            logger.warning(f"   ⚠️  Embedding {i+1}: Conversion failed: {e}")
+                            logger.debug(f"Embedding {i+1}: Conversion failed: {e}")
                             item["embedding"] = None
             
-            # Filter out items with invalid embeddings
             embeddings_data = [item for item in embeddings_data if item.get("embedding") is not None]
             
             if parsed_count > 0:
-                logger.info(
-                    f"✅ Parsed {parsed_count} string embeddings to lists "
-                    f"(will be faster for similarity search)"
-                )
-            
-            # DIAGNOSTIC: Log final format
-            for i, item in enumerate(embeddings_data[:2], 1):
-                embedding = item.get("embedding")
-                summary = item.get("summary", "")
-                if embedding:
-                    embedding_type = type(embedding).__name__
-                    embedding_dim = len(embedding) if hasattr(embedding, '__len__') else 0
-                    logger.debug(
-                        f"   🔬 Final embedding {i}: type={embedding_type}, dim={embedding_dim}, "
-                        f"summary_len={len(summary)}"
-                    )
-        else:
-            logger.debug(f"No session embeddings found for {user_name}")
+                logger.debug(f"Parsed {parsed_count} string embeddings to lists")
         
         return embeddings_data
 
@@ -789,150 +609,226 @@ async def check_session_exists(room_name: str) -> bool:
         return False
 
 
+async def _expand_query_topics_with_semantic_matching(
+    user_name: str,
+    query_topics: List[str]
+) -> List[str]:
+    """Expand query topics by finding semantically similar stored topics.
+    
+    This handles cases where query uses synonyms (e.g., "drawing") but
+    stored topics are consolidated (e.g., "art").
+    
+    Args:
+        user_name: User's name
+        query_topics: Topics extracted from user query
+        
+    Returns:
+        List of stored topics that semantically match query topics
+    """
+    if not query_topics:
+        return []
+    
+    try:
+        from bot.services.llm_topic_extractor import match_topics_semantically
+        
+        # Get all unique stored topics for this user
+        client = get_supabase_client()
+        if not client:
+            return query_topics  # Fallback to original topics
+        
+        normalized_name = user_name.lower().strip()
+        
+        # Get all sessions for this user to collect stored topics
+        result = (
+            client.table("sessions")
+            .select("topics")
+            .eq("user_name", normalized_name)
+            .not_.is_("topics", "null")
+            .execute()
+        )
+        
+        # Collect all unique stored topics
+        stored_topics_set = set()
+        for session in (result.data or []):
+            topics_list = session.get("topics", [])
+            if topics_list:
+                stored_topics_set.update([t.lower() for t in topics_list if t])
+        
+        stored_topics = list(stored_topics_set)
+        
+        if not stored_topics:
+            return query_topics
+        
+        # Use semantic matching to find which stored topics match query topics
+        matched_topics = await match_topics_semantically(
+            query_topics=query_topics,
+            stored_topics=stored_topics,
+            similarity_threshold=0.7
+        )
+        
+        # Combine query topics and matched topics (deduplicated)
+        expanded_topics = list(set(query_topics + matched_topics))
+        
+        if matched_topics:
+            logger.info(
+                f"✅ [TOPIC EXPANSION] query={query_topics} → matched={matched_topics} → "
+                f"expanded={expanded_topics}"
+            )
+        
+        return expanded_topics
+        
+    except Exception as e:
+        logger.warning(
+            f"⚠️  [TOPIC EXPANSION] Error: {type(e).__name__}: {e}, using query topics as-is"
+        )
+        return query_topics
+
+
 async def get_sessions_by_semantic_search(
     user_name: str,
     query_text: str,
     limit: int = 5,
     threshold: float = 0.7,
+    topics: List[str] = None,
+    date_range: Optional[Dict[str, datetime]] = None,
     shadow_memory = None  # Optional ShadowMemory instance for local search
 ) -> List[Dict[str, Any]]:
-    """Get sessions using semantic similarity search.
+    """Get sessions using hybrid search (semantic + keyword + metadata filtering).
     
-    OPTIMIZATION: First tries local cache (no DB query!), then falls back to Supabase.
+    Uses the hybrid_search_sessions() PostgreSQL function which combines:
+    - Semantic similarity search (vector embeddings)
+    - Keyword search (full-text search on summary)
+    - Metadata filtering (topics, dates) using database indexes
+    
+    This replaces the sequential fallback approach with a single optimized query.
     
     Args:
         user_name: User's display name
         query_text: Query text to search for
         limit: Maximum number of sessions to retrieve
-        threshold: Minimum similarity threshold (0.0 to 1.0)
-        shadow_memory: Optional ShadowMemory instance with cached embeddings
+        threshold: Minimum similarity threshold (0.0 to 1.0) for semantic search
+        topics: Optional list of topics for pre-filtering (uses indexed topic column)
+        date_range: Optional dict with 'start' and 'end' datetime for date filtering
+        shadow_memory: Optional ShadowMemory instance (for future local cache optimization)
         
     Returns:
-        List of session dictionaries ordered by similarity score
+        List of session dictionaries ordered by combined_score (descending)
     """
-    logger.info(
-        f"🚀 [FLOW-ENTRY] Starting semantic search: "
-        f"user={user_name}, query='{query_text[:50]}...', "
-        f"limit={limit}, threshold={threshold}"
-    )
-    
     if not settings.SUPABASE_ENABLED or not settings.ENABLE_SEMANTIC_SEARCH:
-        logger.warning("⚠️  [FLOW-ENTRY] Semantic search disabled, falling back to keyword search")
+        logger.debug("Semantic search disabled")
         return []
     
     try:
-        # Step 1: Generate query embedding (check cache first)
-        logger.info(f"🔑 [FLOW-STEP-1] Generating query embedding for: '{query_text[:50]}...'")
+        # Generate query embedding
         query_embedding = await generate_embedding(query_text)
         if not query_embedding:
-            logger.warning("❌ [FLOW-STEP-1] Failed to generate query embedding, falling back to keyword search")
+            logger.warning(
+                f"❌ [HYBRID SEARCH] Failed to generate embedding | "
+                f"User: {user_name} | Query: '{query_text[:80]}...'"
+            )
             return []
         
-        # DIAGNOSTIC: Check query embedding format
-        query_embedding_type = type(query_embedding).__name__
-        query_embedding_dim = len(query_embedding) if query_embedding else 0
-        query_embedding_sample = query_embedding[:3] if query_embedding and len(query_embedding) >= 3 else []
-        first_elem_type = type(query_embedding[0]).__name__ if query_embedding and len(query_embedding) > 0 else "N/A"
-        
-        logger.info(
-            f"✅ [FLOW-STEP-1] Query embedding generated: "
-            f"dim={query_embedding_dim}, type={query_embedding_type}, "
-            f"sample={query_embedding_sample}, first_elem_type={first_elem_type}"
-        )
-        
-        # Step 2: Try local cache first (OPTIMIZATION - no DB query!)
-        if shadow_memory:
-            logger.info(f"🔍 [FLOW-STEP-2] Checking Shadow Memory for cached embeddings...")
-            cached_embeddings = shadow_memory.get_cached_embeddings()
-            if cached_embeddings:
-                logger.info(
-                    f"✅ [FLOW-STEP-2] Found {len(cached_embeddings)} cached embeddings, "
-                    f"performing local similarity search..."
-                )
-                local_results = await search_cached_embeddings(
-                    query_embedding,
-                    cached_embeddings,
-                    threshold=threshold,
-                    limit=limit,
-                    user_name=user_name,  # For fetching full session data
-                    query_text=query_text  # For diagnostic logging
-                )
-                
-                if local_results:
-                    logger.info(
-                        f"✅ [FLOW-STEP-2] Local embedding search found {len(local_results)} matches "
-                        f"(no Supabase vector search needed!)"
-                    )
-                    logger.info(
-                        f"📋 [FLOW-STEP-3] Returning {len(local_results)} sessions with summary text "
-                        f"ready for prompt injection"
-                    )
-                    for i, result in enumerate(local_results, 1):
-                        summary = result.get("summary", "")
-                        similarity = result.get("similarity", 0.0)
-                        logger.info(
-                            f"   Session {i}: similarity={similarity:.3f}, "
-                            f"summary_len={len(summary)}, "
-                            f"has_summary_text={'✅' if summary else '❌'}"
-                        )
-                    return local_results
-            else:
-                logger.info(f"ℹ️  [FLOW-STEP-2] No cached embeddings in Shadow Memory, will try Supabase")
-        else:
-            logger.info(f"ℹ️  [FLOW-STEP-2] Shadow Memory not available, will try Supabase")
-        
-        # Step 3: Fallback to Supabase query (if local cache doesn't have enough or not available)
-        logger.info(f"🌐 [FLOW-STEP-2-FALLBACK] Falling back to Supabase vector search...")
+        # Get Supabase client
         client = get_supabase_client()
         if not client:
-            logger.warning("❌ [FLOW-STEP-2-FALLBACK] Supabase client not available, cannot perform semantic search")
             return []
         
-        # Normalize user name
         normalized_name = user_name.lower().strip()
         
-        # Use the match_sessions function for semantic search
-        logger.info(f"🔍 [FLOW-STEP-2-FALLBACK] Querying Supabase with vector similarity search...")
-        result = client.rpc(
-            "match_sessions",
-            {
-                "query_embedding": query_embedding,
-                "match_threshold": threshold,
-                "match_count": limit,
-                "filter_user_name": normalized_name
-            }
-        ).execute()
+        # Prepare parameters for hybrid_search_sessions function
+        params = {
+            "query_text": query_text,
+            "query_embedding": query_embedding,
+            "filter_user_name": normalized_name,
+            "match_threshold": threshold,
+            "limit_count": limit,
+            "semantic_weight": 0.7,  # 70% weight for semantic similarity
+            "keyword_weight": 0.3,   # 30% weight for keyword matching
+        }
         
-        sessions = result.data if result.data else []
+        # Add optional filters with semantic topic expansion
+        if topics:
+            # Expand query topics using semantic matching to handle synonyms
+            # e.g., query "drawing" → matches stored topic "art"
+            expanded_topics = await _expand_query_topics_with_semantic_matching(
+                user_name=normalized_name,
+                query_topics=topics
+            )
+            params["filter_topics"] = expanded_topics
         
-        if sessions:
-            logger.info(
-                f"✅ [FLOW-STEP-2-FALLBACK] Supabase search found {len(sessions)} relevant sessions "
-                f"for '{query_text[:50]}...' (threshold: {threshold})"
-            )
-            logger.info(
-                f"📋 [FLOW-STEP-3] Extracting summary text from {len(sessions)} Supabase results..."
-            )
-            # Log similarity scores
-            for i, session in enumerate(sessions[:3], 1):
-                similarity = session.get("similarity", 0.0)
-                logger.info(f"   Session {i}: similarity={similarity:.3f}")
-            # Debug-level summary previews
-            for i, s in enumerate(sessions[:3], 1):
-                raw_summary = (s.get("summary", "") or "")
-                summary_preview = raw_summary[:300].replace("\n", " ")
-                logger.debug(
-                    f"[past-context] Fetched semantic session {i} summary preview "
-                    f"(len={len(raw_summary)}): {summary_preview}"
+        if date_range:
+            params["filter_date_from"] = date_range.get("start")
+            params["filter_date_to"] = date_range.get("end")
+        
+        # Call hybrid_search_sessions RPC function
+        logger.info(
+            f"🔍 [HYBRID SEARCH] User: {user_name} | Query: '{query_text[:60]}...' | "
+            f"Topics: {topics} | Threshold: {threshold:.3f}"
+        )
+        
+        try:
+            result = client.rpc("hybrid_search_sessions", params).execute()
+            sessions = result.data if result.data else []
+            
+            # Ensure similarity is always a float (not None) for all sessions
+            for session in sessions:
+                similarity = session.get("similarity")
+                if similarity is None:
+                    # Critical: Log this as it indicates a database function issue
+                    available_fields = list(session.keys())
+                    logger.error(
+                        f"❌ [HYBRID SEARCH] Session {session.get('id', 'unknown')[:8]}... missing 'similarity' field. "
+                        f"Available: {available_fields}. Check hybrid_search_sessions function."
+                    )
+                    session["similarity"] = 0.0
+                elif not isinstance(similarity, (int, float)):
+                    try:
+                        session["similarity"] = float(similarity)
+                    except (ValueError, TypeError):
+                        session["similarity"] = 0.0
+                else:
+                    session["similarity"] = float(similarity)
+            
+            if sessions:
+                # Log top result with key metrics
+                top_session = sessions[0]
+                logger.info(
+                    f"✅ [HYBRID SEARCH] Found {len(sessions)} sessions | "
+                    f"Top: similarity={top_session.get('similarity', 0.0):.3f}, "
+                    f"combined={top_session.get('combined_score', 0.0):.3f}"
                 )
-        else:
-            logger.info(f"ℹ️  No sessions found above threshold {threshold} for semantic search")
-        
-        return sessions
+            else:
+                logger.warning(
+                    f"⚠️  [HYBRID SEARCH] No matches | User: {user_name} | "
+                    f"Query: '{query_text[:60]}...' | Threshold: {threshold:.3f}"
+                )
+            
+            return sessions
+            
+        except Exception as rpc_error:
+            # Check if error is about function not found
+            error_str = str(rpc_error)
+            error_code = getattr(rpc_error, 'code', None) if hasattr(rpc_error, 'code') else None
+            
+            if (error_code == "PGRST202" or 
+                ("hybrid_search_sessions" in error_str and "not found" in error_str.lower())):
+                logger.warning(
+                    f"⚠️  [HYBRID SEARCH] Function not found (PGRST202), falling back to match_sessions. "
+                    f"Run migration: docs/migrations/hybrid_search_function.sql"
+                )
+                return await _fallback_to_match_sessions(
+                    client, normalized_name, query_embedding, threshold, limit, topics, date_range
+                )
+            else:
+                logger.error(
+                    f"❌ [HYBRID SEARCH] RPC error: {type(rpc_error).__name__}: {rpc_error}",
+                    exc_info=True
+                )
+                raise
         
     except Exception as e:
         logger.error(
-            f"Error performing semantic search for {user_name}: {e}",
+            f"❌ [HYBRID SEARCH] Error: {type(e).__name__}: {e} | User: {user_name}",
             exc_info=True
         )
         return []
@@ -984,21 +880,6 @@ async def get_sessions_by_date_range(
         
         sessions = result.data if result.data else []
         
-        if sessions:
-            logger.info(
-                f"✅ Retrieved {len(sessions)} sessions for {user_name} "
-                f"between {start_date.date()} and {end_date.date()}"
-            )
-            # Debug-level summary previews
-            for i, s in enumerate(sessions[:3], 1):
-                raw_summary = (s.get("summary", "") or "")
-                summary_preview = raw_summary[:300].replace("\n", " ")
-                logger.debug(
-                    f"[past-context] Fetched date_range session {i} summary preview "
-                    f"(len={len(raw_summary)}): {summary_preview}"
-                )
-        else:
-            logger.info(f"ℹ️  No sessions found for {user_name} in date range")
         
         return sessions
         
@@ -1010,12 +891,161 @@ async def get_sessions_by_date_range(
         return []
 
 
+# _fallback_keyword_search function removed - replaced by hybrid_search_sessions()
+# which combines semantic + keyword search in a single database query
+
+async def _fallback_keyword_search_DEPRECATED(
+    user_name: str,
+    query_text: str,
+    limit: int = 5,
+    topics: List[str] = None
+) -> List[Dict[str, Any]]:
+    """Fallback keyword search when semantic search finds no matches.
+    
+    Searches for keywords from query text in session summaries.
+    Uses simple text matching (case-insensitive).
+    
+    Args:
+        user_name: User's display name
+        query_text: Query text to extract keywords from
+        limit: Maximum number of sessions to retrieve
+        topics: Optional topics to also search for
+        
+    Returns:
+        List of session dictionaries ordered by relevance
+    """
+    if not settings.SUPABASE_ENABLED:
+        return []
+    
+    client = get_supabase_client()
+    if not client:
+        return []
+    
+    try:
+        normalized_name = user_name.lower().strip()
+        
+        # Extract keywords from query text (remove stop words)
+        stop_words = {
+            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by',
+            'we', 'did', 'do', 'what', 'when', 'where', 'how', 'why', 'about', 'regarding', 'concerning',
+            'related', 'discuss', 'discussed', 'talk', 'talked', 'mention', 'mentioned', 'say', 'said',
+            'this', 'that', 'these', 'those', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+            'have', 'has', 'had', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'must',
+            'just', 'only', 'also', 'too', 'very', 'much', 'more', 'most', 'some', 'any',
+            'past', 'previous', 'before', 'ago', 'last', 'time', 'times', 'session', 'conversation'
+        }
+        
+        # Extract keywords from query
+        query_words = query_text.lower().split()
+        keywords = [w for w in query_words if len(w) > 2 and w not in stop_words]
+        
+        # Add topics if provided
+        if topics:
+            keywords.extend([t.lower() for t in topics if len(t) > 2])
+        
+        # Remove duplicates
+        keywords = list(set(keywords))
+        
+        if not keywords:
+            logger.debug("No keywords extracted for fallback search")
+            return []
+        
+        logger.info(
+            f"🔍 [KEYWORD SEARCH] Starting database query | "
+            f"Keywords: {keywords} | User: {user_name} | Limit: {limit * 5}"
+        )
+        
+        # Fetch recent sessions from database
+        logger.info(
+            f"📊 [DATABASE QUERY] Executing: SELECT * FROM sessions WHERE user_name = '{normalized_name}' "
+            f"ORDER BY created_at DESC LIMIT {limit * 5}"
+        )
+        result = (
+            client.table("sessions")
+            .select("*")
+            .eq("user_name", normalized_name)
+            .order("created_at", desc=True)
+            .limit(limit * 5)  # Get more to filter
+            .execute()
+        )
+        
+        all_sessions = result.data if result.data else []
+        logger.info(
+            f"📊 [DATABASE QUERY] Retrieved {len(all_sessions)} sessions from database | "
+            f"Will filter by keyword matching in Python"
+        )
+        
+        # Score sessions by keyword matches
+        logger.info(
+            f"🔍 [KEYWORD MATCHING] Scoring {len(all_sessions)} sessions by keyword matches | "
+            f"Keywords to match: {keywords}"
+        )
+        scored_sessions = []
+        for i, session in enumerate(all_sessions, 1):
+            summary = session.get("summary", "").lower()
+            score = 0
+            matched_keywords = []
+            
+            for keyword in keywords:
+                if keyword in summary:
+                    score += 1
+                    matched_keywords.append(keyword)
+            
+            if score > 0:
+                logger.info(
+                    f"  ✅ [KEYWORD MATCH {i}] Score: {score}/{len(keywords)} keywords matched | "
+                    f"Matched: {matched_keywords} | Summary: '{summary[:80]}...'"
+                )
+                scored_sessions.append({
+                    "session": session,
+                    "score": score,
+                    "matched_keywords": matched_keywords
+                })
+            else:
+                logger.debug(
+                    f"  ❌ [KEYWORD NO MATCH {i}] Score: 0/{len(keywords)} | "
+                    f"No keywords found in summary"
+                )
+        
+        # Sort by score (highest first)
+        scored_sessions.sort(key=lambda x: x["score"], reverse=True)
+        
+        # Return top matches
+        results = [item["session"] for item in scored_sessions[:limit]]
+        
+        if results:
+            all_matched_keywords = set(
+                kw for item in scored_sessions[:limit] 
+                for kw in item['matched_keywords']
+            )
+            logger.info(
+                f"✅ [KEYWORD SEARCH] Found {len(results)} sessions | "
+                f"Total scored: {len(scored_sessions)} | "
+                f"Matched keywords: {', '.join(sorted(all_matched_keywords))} | "
+                f"Top score: {scored_sessions[0]['score']}/{len(keywords)}"
+            )
+        else:
+            logger.info(
+                f"❌ [KEYWORD SEARCH] No sessions matched any keywords | "
+                f"Searched {len(all_sessions)} sessions | Keywords: {keywords}"
+            )
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error in keyword search fallback: {e}", exc_info=True)
+        return []
+
+
 async def get_sessions_by_topic(
     user_name: str,
     topics: List[str],
     limit: int = 5
 ) -> List[Dict[str, Any]]:
-    """Get sessions containing specific topics (keyword search).
+    """Get sessions containing specific topics using indexed topic column.
+    
+    Uses GIN index on topics array for fast filtering. Falls back to summary text
+    search if topics column is not available (backward compatibility).
     
     Args:
         user_name: User's display name
@@ -1034,76 +1064,86 @@ async def get_sessions_by_topic(
         logger.warning("Supabase client not available, cannot retrieve sessions by topic")
         return []
     
+    if not topics:
+        return []
+    
     try:
         normalized_name = user_name.lower().strip()
+        normalized_topics = [t.lower().strip() for t in topics if t and t.strip()]
         
-        # Build query with OR conditions for topics
-        query = (
+        if not normalized_topics:
+            return []
+        
+        logger.debug(f"Searching for topics: {normalized_topics} (limit={limit}, user={user_name})")
+        
+        # Try indexed topic search first (if topics column exists)
+        try:
+            # Use Supabase array overlap operator (&&) - uses GIN index
+            # This finds sessions where topics array overlaps with search topics
+            result = (
+                client.table("sessions")
+                .select("*")
+                .eq("user_name", normalized_name)
+                .overlaps("topics", normalized_topics)  # Array overlap - uses GIN index
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            
+            sessions = result.data if result.data else []
+            
+            # get_sessions_by_topic doesn't return similarity (it's not a semantic search)
+            # Set similarity to None explicitly so context_injector knows it's N/A
+            for session in sessions:
+                if "similarity" not in session:
+                    session["similarity"] = None
+            
+            if sessions:
+                logger.debug(f"Found {len(sessions)} sessions using topic index for topics: {', '.join(normalized_topics)}")
+                return sessions
+            else:
+                logger.debug(f"No sessions found using topic index, trying fallback search")
+        except Exception as e:
+            # Fallback if topics column doesn't exist or query fails
+            logger.debug(f"Topic index query failed (may not exist yet): {e}, using fallback")
+        
+        # Fallback: Search in summary text (backward compatibility)
+        result = (
             client.table("sessions")
             .select("*")
             .eq("user_name", normalized_name)
+            .order("created_at", desc=True)
+            .limit(limit * 5)
+            .execute()
         )
         
-        # Add topic filters (OR condition - session contains any topic)
-        if topics:
-            logger.info(
-                f"🔍 [TOPIC-SEARCH] Searching for topics: {topics} "
-                f"(limit={limit}, user={user_name})"
-            )
-            # Supabase doesn't support OR directly, so we'll filter in Python
-            # First get all sessions for user, then filter by topics
-            # Get more sessions to increase chance of finding matches
-            result = query.order("created_at", desc=True).limit(limit * 5).execute()
-            all_sessions = result.data if result.data else []
-            
-            logger.info(
-                f"📋 [TOPIC-SEARCH] Retrieved {len(all_sessions)} sessions from DB, "
-                f"filtering for topics: {topics}"
-            )
-            
-            # Filter by topics (case-insensitive)
-            matching_sessions = []
-            for session in all_sessions:
-                summary = session.get("summary", "").lower()
-                session_topics_found = []
-                for topic in topics:
-                    if topic.lower() in summary:
-                        session_topics_found.append(topic)
-                
-                if session_topics_found:
-                    logger.info(
-                        f"✅ [TOPIC-SEARCH] Match found! Session contains topics: {session_topics_found}"
-                    )
+        all_sessions = result.data if result.data else []
+        
+        # Filter by topics in summary text (case-insensitive)
+        matching_sessions = []
+        for session in all_sessions:
+            summary = session.get("summary", "").lower()
+            for topic in normalized_topics:
+                if topic in summary:
                     matching_sessions.append(session)
-                    if len(matching_sessions) >= limit:
-                        break
-            
-            if not matching_sessions:
-                logger.warning(
-                    f"⚠️  [TOPIC-SEARCH] No sessions found containing topics: {topics}"
-                )
-            
-            sessions = matching_sessions
-        else:
-            sessions = []
+                    break
+                if len(matching_sessions) >= limit:
+                    break
+            if len(matching_sessions) >= limit:
+                break
+        
+        sessions = matching_sessions
+        
+        # get_sessions_by_topic doesn't return similarity (it's not a semantic search)
+        # Set similarity to None explicitly so context_injector knows it's N/A
+        for session in sessions:
+            if "similarity" not in session:
+                session["similarity"] = None
         
         if sessions:
-            logger.info(
-                f"✅ [TOPIC-SEARCH] Successfully found {len(sessions)} sessions for {user_name} "
-                f"containing topics: {', '.join(topics)}"
-            )
-            # Log summary previews at INFO level for visibility
-            for i, s in enumerate(sessions[:3], 1):
-                raw_summary = (s.get("summary", "") or "")
-                summary_preview = raw_summary[:200].replace("\n", " ").replace("\r", " ")
-                logger.info(
-                    f"   📄 Session {i}/{len(sessions)}: summary_preview='{summary_preview}...' "
-                    f"(len={len(raw_summary)})"
-                )
+            logger.debug(f"Found {len(sessions)} sessions using fallback search for topics: {', '.join(normalized_topics)}")
         else:
-            logger.warning(
-                f"⚠️  [TOPIC-SEARCH] No sessions found for {user_name} with topics: {', '.join(topics)}"
-            )
+            logger.debug(f"No sessions found for {user_name} with topics: {', '.join(normalized_topics)}")
         
         return sessions
         
@@ -1149,20 +1189,9 @@ async def get_all_sessions(user_name: str, limit: int = 5) -> List[Dict[str, Any
         sessions = result.data if result.data else []
         
         if sessions:
-            logger.info(
-                f"✅ Retrieved {len(sessions)} sessions for {user_name} "
-                f"(requested: {limit})"
-            )
-            # Debug-level summary previews
-            for i, s in enumerate(sessions[:3], 1):
-                raw_summary = (s.get("summary", "") or "")
-                summary_preview = raw_summary[:300].replace("\n", " ")
-                logger.debug(
-                    f"[past-context] Fetched all_sessions {i} summary preview "
-                    f"(len={len(raw_summary)}): {summary_preview}"
-                )
+            logger.debug(f"Retrieved {len(sessions)} sessions for {user_name} (requested: {limit})")
         else:
-            logger.info(f"ℹ️  No sessions found for {user_name}")
+            logger.debug(f"No sessions found for {user_name}")
         
         return sessions
         
@@ -1172,3 +1201,357 @@ async def get_all_sessions(user_name: str, limit: int = 5) -> List[Dict[str, Any
             exc_info=True
         )
         return []
+
+
+async def _fallback_to_match_sessions(
+    client,
+    user_name: str,
+    query_embedding: List[float],
+    threshold: float,
+    limit: int,
+    topics: Optional[List[str]] = None,
+    date_range: Optional[Dict[str, datetime]] = None
+) -> List[Dict[str, Any]]:
+    """Fallback to old match_sessions function if hybrid_search_sessions is not available.
+    
+    This provides backward compatibility until migrations are run.
+    
+    Args:
+        client: Supabase client
+        user_name: Normalized user name
+        query_embedding: Query embedding vector
+        threshold: Similarity threshold
+        limit: Result limit
+        topics: Optional topics for post-filtering
+        date_range: Optional date range for post-filtering
+        
+    Returns:
+        List of session dictionaries
+    """
+    try:
+        logger.debug("Using fallback match_sessions function")
+        
+        # Use old match_sessions function
+        result = client.rpc(
+            "match_sessions",
+            {
+                "query_embedding": query_embedding,
+                "match_threshold": threshold,
+                "match_count": limit * 2,  # Get more to filter
+                "filter_user_name": user_name
+            }
+        ).execute()
+        
+        sessions = result.data if result.data else []
+        
+        # Post-filter by topics if provided (client-side filtering)
+        if topics and sessions:
+            topic_lower = [t.lower() for t in topics]
+            filtered_sessions = []
+            for session in sessions:
+                session_topics = session.get("topics", [])
+                if session_topics and any(t.lower() in topic_lower for t in session_topics):
+                    filtered_sessions.append(session)
+                elif not session_topics:
+                    # Fallback: check summary text if topics column not populated
+                    summary = session.get("summary", "").lower()
+                    if any(t in summary for t in topic_lower):
+                        filtered_sessions.append(session)
+            sessions = filtered_sessions[:limit]
+        
+        # Post-filter by date range if provided
+        if date_range and sessions:
+            start_date = date_range.get("start")
+            end_date = date_range.get("end")
+            filtered_sessions = []
+            for session in sessions:
+                created_at_str = session.get("created_at")
+                if created_at_str:
+                    try:
+                        from datetime import datetime
+                        created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+                        if start_date and created_at < start_date:
+                            continue
+                        if end_date and created_at > end_date:
+                            continue
+                        filtered_sessions.append(session)
+                    except Exception:
+                        # If date parsing fails, include the session
+                        filtered_sessions.append(session)
+                else:
+                    filtered_sessions.append(session)
+            sessions = filtered_sessions[:limit]
+        
+        if sessions:
+            logger.info(
+                f"✅ [FALLBACK SEARCH] Found {len(sessions)} sessions using match_sessions "
+                f"(threshold: {threshold:.4f})"
+            )
+        else:
+            logger.info(
+                f"❌ [FALLBACK SEARCH] No matches found using match_sessions "
+                f"(threshold: {threshold:.4f})"
+            )
+        
+        return sessions
+        
+    except Exception as e:
+        logger.error(f"Error in fallback match_sessions: {e}", exc_info=True)
+        return []
+
+
+async def _fallback_to_match_sessions(
+    client,
+    user_name: str,
+    query_embedding: List[float],
+    threshold: float,
+    limit: int,
+    topics: Optional[List[str]] = None,
+    date_range: Optional[Dict[str, datetime]] = None
+) -> List[Dict[str, Any]]:
+    """Fallback to old match_sessions function if hybrid_search_sessions is not available.
+    
+    This provides backward compatibility until migrations are run.
+    
+    Args:
+        client: Supabase client
+        user_name: Normalized user name
+        query_embedding: Query embedding vector
+        threshold: Similarity threshold
+        limit: Result limit
+        topics: Optional topics for post-filtering
+        date_range: Optional date range for post-filtering
+        
+    Returns:
+        List of session dictionaries
+    """
+    try:
+        logger.debug("Using fallback match_sessions function")
+        
+        # Use old match_sessions function
+        result = client.rpc(
+            "match_sessions",
+            {
+                "query_embedding": query_embedding,
+                "match_threshold": threshold,
+                "match_count": limit * 2,  # Get more to filter
+                "filter_user_name": user_name
+            }
+        ).execute()
+        
+        sessions = result.data if result.data else []
+        
+        # Post-filter by topics if provided (client-side filtering)
+        if topics and sessions:
+            topic_lower = [t.lower() for t in topics]
+            filtered_sessions = []
+            for session in sessions:
+                session_topics = session.get("topics", [])
+                if session_topics and any(t.lower() in topic_lower for t in session_topics):
+                    filtered_sessions.append(session)
+                elif not session_topics:
+                    # Fallback: check summary text if topics column not populated
+                    summary = session.get("summary", "").lower()
+                    if any(t in summary for t in topic_lower):
+                        filtered_sessions.append(session)
+            sessions = filtered_sessions[:limit]
+        
+        # Post-filter by date range if provided
+        if date_range and sessions:
+            start_date = date_range.get("start")
+            end_date = date_range.get("end")
+            filtered_sessions = []
+            for session in sessions:
+                created_at_str = session.get("created_at")
+                if created_at_str:
+                    try:
+                        from datetime import datetime
+                        created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+                        if start_date and created_at < start_date:
+                            continue
+                        if end_date and created_at > end_date:
+                            continue
+                        filtered_sessions.append(session)
+                    except Exception:
+                        # If date parsing fails, include the session
+                        filtered_sessions.append(session)
+                else:
+                    filtered_sessions.append(session)
+            sessions = filtered_sessions[:limit]
+        
+        if sessions:
+            logger.info(
+                f"✅ [FALLBACK SEARCH] Found {len(sessions)} sessions using match_sessions "
+                f"(threshold: {threshold:.4f})"
+            )
+        else:
+            logger.info(
+                f"❌ [FALLBACK SEARCH] No matches found using match_sessions "
+                f"(threshold: {threshold:.4f})"
+            )
+        
+        return sessions
+        
+    except Exception as e:
+        logger.error(f"Error in fallback match_sessions: {e}", exc_info=True)
+        return []
+
+
+def _get_current_embedding_model() -> Optional[str]:
+    """Get the name of the current embedding model.
+    
+    This returns the actual model name being used, which should match
+    the pre-loaded SentenceTransformer model (all-MiniLM-L6-v2).
+    
+    Returns:
+        Model name string (e.g., "all-MiniLM-L6-v2", "text-embedding-3-small") or None
+    """
+    if not settings.ENABLE_SEMANTIC_SEARCH:
+        return None
+    
+    # Determine which model is being used
+    use_local = (
+        settings.EMBEDDING_MODEL == "local" or 
+        not settings.EMBEDDING_MODEL.startswith("text-embedding") or
+        not getattr(settings, 'OPENAI_API_KEY', None)
+    )
+    
+    if use_local:
+        # Return the local model name from settings (defaults to all-MiniLM-L6-v2)
+        # This should match the pre-loaded SentenceTransformer model
+        model_name = getattr(settings, 'LOCAL_EMBEDDING_MODEL', 'all-MiniLM-L6-v2')
+        logger.debug(f"Using local embedding model: {model_name}")
+        return model_name
+    else:
+        # Return OpenAI model name
+        model_name = settings.EMBEDDING_MODEL
+        logger.debug(f"Using OpenAI embedding model: {model_name}")
+        return model_name
+
+
+async def batch_generate_embeddings_for_sessions(
+    user_name: Optional[str] = None,
+    limit: int = 100,
+    model_name: Optional[str] = None
+) -> Dict[str, Any]:
+    """Batch generate embeddings for sessions that don't have embeddings.
+    
+    Useful for:
+    - Backfilling embeddings for old sessions
+    - Re-embedding when model changes
+    - Fixing sessions with missing embeddings
+    
+    Args:
+        user_name: Optional user name to filter sessions (None = all users)
+        limit: Maximum number of sessions to process
+        model_name: Optional model name to filter by (None = current model)
+        
+    Returns:
+        Dict with statistics: {"processed": int, "successful": int, "failed": int, "skipped": int}
+    """
+    if not settings.SUPABASE_ENABLED or not settings.ENABLE_SEMANTIC_SEARCH:
+        logger.warning("Supabase or semantic search disabled, cannot batch generate embeddings")
+        return {"processed": 0, "successful": 0, "failed": 0, "skipped": 0}
+    
+    client = get_supabase_client()
+    if not client:
+        logger.error("Supabase client not available")
+        return {"processed": 0, "successful": 0, "failed": 0, "skipped": 0}
+    
+    try:
+        current_model = _get_current_embedding_model()
+        if not current_model:
+            logger.error("Cannot determine current embedding model")
+            return {"processed": 0, "successful": 0, "failed": 0, "skipped": 0}
+        
+        # Build query to find sessions without embeddings or with different model
+        query = client.table("sessions").select("id, summary, embedding_model")
+        
+        if user_name:
+            query = query.eq("user_name", user_name.lower().strip())
+        
+        # Filter: no embedding OR embedding_model is NULL OR embedding_model != current_model
+        # Note: Supabase doesn't support OR directly, so we'll fetch and filter in Python
+        query = query.is_("embedding", "null").limit(limit * 2)  # Get more to filter
+        
+        result = query.execute()
+        all_sessions = result.data if result.data else []
+        
+        # Filter sessions that need embeddings
+        sessions_to_process = []
+        for session in all_sessions:
+            session_model = session.get("embedding_model")
+            has_embedding = session.get("embedding") is not None
+            
+            # Process if: no embedding OR different model OR explicitly requested model
+            if not has_embedding:
+                sessions_to_process.append(session)
+            elif model_name and session_model != model_name:
+                sessions_to_process.append(session)
+            elif not model_name and session_model != current_model:
+                sessions_to_process.append(session)
+            
+            if len(sessions_to_process) >= limit:
+                break
+        
+        if not sessions_to_process:
+            logger.info("No sessions need embedding generation")
+            return {"processed": 0, "successful": 0, "failed": 0, "skipped": len(all_sessions)}
+        
+        logger.info(
+            f"Batch generating embeddings for {len(sessions_to_process)} sessions "
+            f"(model: {current_model})"
+        )
+        
+        stats = {"processed": 0, "successful": 0, "failed": 0, "skipped": 0}
+        
+        for session in sessions_to_process:
+            session_id = session.get("id")
+            summary = session.get("summary", "")
+            
+            if not summary or len(summary.strip()) < 10:
+                logger.debug(f"Skipping session {session_id}: summary too short")
+                stats["skipped"] += 1
+                continue
+            
+            try:
+                # Generate embedding
+                embedding = await generate_embedding(summary.strip())
+                if not embedding:
+                    logger.warning(f"Failed to generate embedding for session {session_id}")
+                    stats["failed"] += 1
+                    continue
+                
+                # Update session with embedding and model
+                update_data = {
+                    "embedding": embedding,
+                    "embedding_model": current_model
+                }
+                
+                client.table("sessions").update(update_data).eq("id", session_id).execute()
+                
+                stats["successful"] += 1
+                stats["processed"] += 1
+                
+                if stats["processed"] % 10 == 0:
+                    logger.info(
+                        f"Progress: {stats['processed']}/{len(sessions_to_process)} "
+                        f"(successful: {stats['successful']}, failed: {stats['failed']})"
+                    )
+                    
+            except Exception as e:
+                logger.error(f"Error processing session {session_id}: {e}", exc_info=True)
+                stats["failed"] += 1
+                stats["processed"] += 1
+        
+        logger.info(
+            f"Batch embedding generation complete: "
+            f"processed={stats['processed']}, successful={stats['successful']}, "
+            f"failed={stats['failed']}, skipped={stats['skipped']}"
+        )
+        
+        return stats
+        
+    except Exception as e:
+        logger.error(f"Error in batch embedding generation: {e}", exc_info=True)
+        return {"processed": 0, "successful": 0, "failed": 0, "skipped": 0}

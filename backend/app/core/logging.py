@@ -75,6 +75,22 @@ def setup_logging(log_level: Optional[str] = None) -> None:
     logging.getLogger("livekit.rtc").setLevel(logging.WARNING)
     logging.getLogger("livekit.protocol").setLevel(logging.ERROR)
     
+    # Suppress sentence-transformers and Hugging Face verbose logs
+    logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+    logging.getLogger("transformers").setLevel(logging.WARNING)
+    logging.getLogger("transformers.modeling_utils").setLevel(logging.ERROR)
+    logging.getLogger("transformers.configuration_utils").setLevel(logging.ERROR)
+    logging.getLogger("transformers.tokenization_utils_base").setLevel(logging.ERROR)
+    logging.getLogger("transformers.modeling_bert").setLevel(logging.ERROR)
+    
+    # Suppress filelock verbose DEBUG logs
+    logging.getLogger("filelock").setLevel(logging.WARNING)
+    
+    # Suppress Hugging Face hub logs
+    logging.getLogger("huggingface_hub").setLevel(logging.WARNING)
+    logging.getLogger("huggingface_hub.file_download").setLevel(logging.ERROR)
+    logging.getLogger("huggingface_hub.hf_api").setLevel(logging.ERROR)
+    
     # Suppress verbose bot main module logs
     logging.getLogger("__mp_main__").setLevel(logging.WARNING)
     logging.getLogger("bot.main").setLevel(logging.WARNING)

@@ -193,13 +193,17 @@ def build_past_context(
     
     past_context = "\n\n## PAST SESSIONS CONTEXT (Agentic Memory)\n"
     past_context += f"You have access to summaries from {len(truncated_sessions)} recent sessions with {user_name}. "
-    past_context += "This enables you to provide continuity, remember their journey, and answer questions about past conversations.\n\n"
+    past_context += "Use this information to answer their specific questions about past conversations.\n\n"
+    past_context += "**IMPORTANT - Focus on User's Query:**\n"
+    past_context += "- When {user_name} asks a question, focus your answer specifically on what they asked about\n"
+    past_context += "- Do not provide generic information or topics they didn't ask about\n"
+    past_context += "- Reference past sessions only when directly relevant to their current question\n"
+    past_context += "- Be precise and relevant - avoid broad, generic responses\n\n"
     past_context += "**Your capabilities with past sessions:**\n"
-    past_context += "1. **Remember & Reference**: You can remember goals, concerns, progress, and topics from past sessions\n"
-    past_context += "2. **Answer Questions**: When {user_name} asks about past sessions (e.g., 'What did we discuss last time?', 'What was my goal?'), you can reference the summaries below\n"
+    past_context += "1. **Answer Specific Questions**: When {user_name} asks about past sessions, reference the relevant information from summaries below\n"
+    past_context += "2. **Be Precise**: Only mention topics, goals, or information that directly relates to their question\n"
     past_context += "3. **Provide Continuity**: Reference past conversations naturally when relevant to current topics\n"
-    past_context += "4. **Track Progress**: Acknowledge achievements, changes, or progress mentioned across sessions\n"
-    past_context += "5. **Share Context**: When asked, you can share specific information from past sessions (e.g., 'In our session on [date], we discussed...')\n\n"
+    past_context += "4. **Track Progress**: Acknowledge achievements or progress when specifically asked about it\n\n"
     past_context += "**Recent session summaries (most recent first):**\n\n"
     
     for i, session in enumerate(truncated_sessions, 1):
@@ -229,16 +233,13 @@ def build_past_context(
         past_context += f"Summary: {summary}\n\n"
     
     past_context += "**Guidelines for using past context:**\n"
-    past_context += f"- **When {user_name} asks about past sessions**: Reference the specific session(s) and share relevant information\n"
-    past_context += "- **When topics connect**: Naturally reference past conversations (e.g., 'Last time we discussed your sleep schedule...')\n"
-    past_context += "- **When acknowledging progress**: Reference past sessions to show continuity (e.g., 'I remember you mentioned...')\n"
-    past_context += "- **Be specific**: When sharing from past sessions, mention the date or session number if helpful\n"
-    past_context += "- **Don't force it**: Only reference past sessions when it adds value or when the user asks\n"
-    past_context += "- **Be warm and personal**: Show you remember their journey and care about their progress\n"
-    past_context += "- **Multiple sessions**: You can reference and combine information from multiple past sessions when relevant. For example, if asked about progress over time, reference multiple sessions to show the journey\n"
-    past_context += f"- **User questions**: If {user_name} asks 'What did we talk about before?', 'What was my goal?', 'What progress have I made?', or 'What did we discuss about [topic]?', use the summaries above to provide specific, detailed answers\n"
-    past_context += "- **Cross-session patterns**: When you notice patterns or themes across multiple sessions, you can reference them (e.g., 'I've noticed across our sessions that you've been working on...')\n"
-    past_context += "- **Timeline awareness**: You can reference the timeline of sessions (e.g., 'In our earlier sessions, you mentioned... and more recently, you've been focusing on...')"
+    past_context += f"- **Focus on the query**: When {user_name} asks a question, answer it directly using relevant information from the summaries\n"
+    past_context += f"- **Be specific**: If {user_name} asks about a specific topic (e.g., 'zumba'), only discuss that topic, not generic related topics\n"
+    past_context += "- **Avoid generic terms**: Don't extract or mention generic wellness topics unless the user specifically asked about them\n"
+    past_context += "- **Precision over breadth**: Better to give a focused answer about what they asked than a broad answer covering many topics\n"
+    past_context += "- **When topics connect**: Naturally reference past conversations only when directly relevant (e.g., 'Last time you mentioned zumba classes...')\n"
+    past_context += "- **Don't force it**: Only reference past sessions when it directly answers their question\n"
+    past_context += f"- **Answer the question**: If {user_name} asks 'What did we discuss about [topic]?', find and share ONLY information about that specific topic from the summaries\n"
     
     return past_context, len(truncated_sessions)
 

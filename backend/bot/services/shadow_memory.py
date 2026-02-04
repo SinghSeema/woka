@@ -69,30 +69,14 @@ class ShadowMemory:
             logger.info(f"🔥 Pre-warming Shadow Memory for {self.user_name} (fetching last {limit} sessions)...")
             start_time = datetime.now()
             
-            # OPTIMIZATION: Pre-warm embeddings first (lighter, faster)
-            # Fetch only embeddings (summary + embedding vector) instead of full sessions
-            logger.info(f"📥 [FLOW-STEP-1] Fetching embeddings for {self.user_name}...")
+            # Pre-warm embeddings first (lighter, faster)
             embedding_data = await get_past_session_embeddings(self.user_name, limit=limit)
             if embedding_data:
-                # Store for local similarity search
-                logger.info(
-                    f"💾 [FLOW-STEP-1] Storing {len(embedding_data)} embeddings in Shadow Memory "
-                    f"(each has summary + embedding vector)"
-                )
-                for i, item in enumerate(embedding_data[:3], 1):  # Log first 3
-                    summary = item.get("summary", "")
-                    embedding = item.get("embedding")
-                    summary_preview = summary[:100].replace("\n", " ") if summary else "N/A"
-                    embedding_dim = len(embedding) if embedding else 0
-                    logger.info(
-                        f"   Embedding {i}: summary_len={len(summary)}, "
-                        f"embedding_dim={embedding_dim}, preview='{summary_preview}...'"
-                    )
                 self.cached_embeddings = embedding_data
                 await self._prewarm_embedding_cache(embedding_data)
-                logger.info(f"✅ [FLOW-STEP-1] Embeddings stored and ready for similarity search")
+                logger.debug(f"Stored {len(embedding_data)} embeddings in Shadow Memory")
             else:
-                logger.warning(f"⚠️  [FLOW-STEP-1] No embeddings found for {self.user_name}")
+                logger.debug(f"No embeddings found for {self.user_name}")
             
             # Fetch last N sessions (non-blocking, async) for session cache
             sessions = await get_past_sessions(self.user_name, limit=limit)
