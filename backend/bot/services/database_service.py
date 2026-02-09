@@ -134,6 +134,9 @@ async def search_cached_embeddings(
     Returns:
         List of matching sessions with similarity scores
     """
+    if not settings.ENABLE_SESSION_EMBEDDINGS:
+        logger.debug("Session embeddings disabled; skipping cached embedding search")
+        return []
     if not query_embedding or not cached_embeddings:
         logger.debug(f"Cannot search: query_embedding={bool(query_embedding)}, cached_embeddings={len(cached_embeddings) if cached_embeddings else 0}")
         return []
@@ -329,7 +332,7 @@ async def save_session_summary(
 
         # Generate embedding for semantic search if enabled
         embedding = None
-        if settings.ENABLE_SEMANTIC_SEARCH:
+        if settings.ENABLE_SEMANTIC_SEARCH and settings.ENABLE_SESSION_EMBEDDINGS:
             # Generate embedding for session summary (no verbose logging of vector contents)
             # Uses pre-loaded SentenceTransformer model (all-MiniLM-L6-v2)
             try:
@@ -355,7 +358,12 @@ async def save_session_summary(
                 else:
                     logger.warning("⚠️  Failed to generate embedding, saving without embedding")
             except Exception as e:
-                logger.error(f"❌ Error generating embedding: {e}, saving without embedding", exc_info=True)
+                logger.error(
+                    f"❌ Error generating embedding: {e}, saving without embedding",
+                    exc_info=True,
+                )
+        elif settings.ENABLE_SEMANTIC_SEARCH and not settings.ENABLE_SESSION_EMBEDDINGS:
+            logger.info("Session embeddings disabled; saving summary without embedding")
 
         # Match the schema: room_name, user_name, summary, duration_seconds, message_count, embedding, topics
         # created_at and updated_at are auto-managed by the database
@@ -498,7 +506,11 @@ async def get_past_session_embeddings(user_name: str, limit: int = 3) -> List[Di
     Returns:
         List of dictionaries with 'summary' and 'embedding' keys
     """
-    if not settings.SUPABASE_ENABLED or not settings.ENABLE_SEMANTIC_SEARCH:
+    if (
+        not settings.SUPABASE_ENABLED
+        or not settings.ENABLE_SEMANTIC_SEARCH
+        or not settings.ENABLE_SESSION_EMBEDDINGS
+    ):
         logger.debug("Supabase or semantic search disabled, skipping embedding pre-warm")
         return []
 
@@ -714,8 +726,12 @@ async def get_sessions_by_semantic_search(
     Returns:
         List of session dictionaries ordered by combined_score (descending)
     """
-    if not settings.SUPABASE_ENABLED or not settings.ENABLE_SEMANTIC_SEARCH:
-        logger.debug("Semantic search disabled")
+    if (
+        not settings.SUPABASE_ENABLED
+        or not settings.ENABLE_SEMANTIC_SEARCH
+        or not settings.ENABLE_SESSION_EMBEDDINGS
+    ):
+        logger.debug("Semantic search disabled (embeddings off)")
         return []
     
     try:
@@ -1058,6 +1074,39 @@ async def get_sessions_by_topic(
     if not settings.SUPABASE_ENABLED:
         logger.debug("Supabase disabled, returning empty sessions")
         return []
+
+
+async def get_sessions_by_room_names(
+    user_name: str,
+    room_names: List[str]
+) -> List[Dict[str, Any]]:
+    """Fetch sessions by room names for a user."""
+    if not settings.SUPABASE_ENABLED:
+        return []
+    if not room_names:
+        return []
+
+    client = get_supabase_client()
+    if not client:
+        return []
+
+    try:
+        normalized_name = user_name.lower().strip()
+        unique_rooms = list({r for r in room_names if r})
+        if not unique_rooms:
+            return []
+
+        result = (
+            client.table("sessions")
+            .select("*")
+            .eq("user_name", normalized_name)
+            .in_("room_name", unique_rooms)
+            .execute()
+        )
+        return result.data if result.data else []
+    except Exception as e:
+        logger.error(f"Error retrieving sessions by room names: {e}", exc_info=True)
+        return []
     
     client = get_supabase_client()
     if not client:
@@ -1152,6 +1201,193 @@ async def get_sessions_by_topic(
             f"Error retrieving sessions by topic for {user_name}: {e}",
             exc_info=True
         )
+        return []
+
+
+async def save_chunk_question_rows(
+    rows: List[Dict[str, Any]]
+) -> int:
+    """Save chunk question rows to Supabase.
+
+    Args:
+        rows: List of chunk question row dicts
+
+    Returns:
+        Number of rows inserted
+    """
+    if not settings.SUPABASE_ENABLED:
+        return 0
+    if not rows:
+        return 0
+
+    client = get_supabase_client()
+    if not client:
+        return 0
+
+    try:
+        result = client.table("session_chunk_questions").insert(rows).execute()
+        inserted = len(result.data) if result.data else 0
+        logger.info(f"✅ [CHUNK QUESTIONS] Saved {inserted} rows")
+        return inserted
+    except Exception as e:
+        logger.error(f"Error saving chunk questions: {e}", exc_info=True)
+        return 0
+
+
+async def get_chunk_questions_by_semantic_search(
+    user_name: str,
+    query_text: str,
+    limit: int = 5,
+    threshold: float = 0.7,
+    topics: List[str] = None
+) -> List[Dict[str, Any]]:
+    """Semantic search over chunk questions."""
+    if (
+        not settings.SUPABASE_ENABLED
+        or not settings.ENABLE_SEMANTIC_SEARCH
+        or not settings.ENABLE_CHUNK_QUESTION_SEMANTIC_MATCHING
+    ):
+        return []
+
+    client = get_supabase_client()
+    if not client:
+        return []
+
+    try:
+        query_embedding = await generate_embedding(query_text)
+        if not query_embedding:
+            return []
+
+        normalized_name = user_name.lower().strip()
+        params = {
+            "query_embedding": query_embedding,
+            "filter_user_name": normalized_name,
+            "match_threshold": threshold,
+            "limit_count": limit,
+        }
+        if topics:
+            params["filter_topics"] = topics
+
+        try:
+            result = client.rpc("match_chunk_questions_with_sessions", params).execute()
+            matches = result.data if result.data else []
+            if matches:
+                top = matches[0]
+                logger.info(
+                    "✅ [CHUNK SEMANTIC] matches=%d | top_similarity=%.3f | query='%s...'",
+                    len(matches),
+                    float(top.get("similarity") or 0.0),
+                    query_text[:60],
+                )
+            for i, match in enumerate(matches[:3], 1):
+                logger.info(
+                    "   ↳ [CHUNK SEMANTIC %d] similarity=%.3f | question='%s...'",
+                    i,
+                    float(match.get("similarity") or 0.0),
+                    (match.get("question_text") or "")[:80],
+                )
+            else:
+                logger.info(
+                    "❌ [CHUNK SEMANTIC] no matches | threshold=%.2f | query='%s...'",
+                    threshold,
+                    query_text[:60],
+                )
+            return matches
+        except Exception as rpc_error:
+            error_str = str(rpc_error).lower()
+            error_code = getattr(rpc_error, "code", None)
+            if error_code == "PGRST202" or "not found" in error_str or "could not find" in error_str:
+                result = client.rpc("match_chunk_questions", params).execute()
+                matches = result.data if result.data else []
+                if matches:
+                    top = matches[0]
+                    logger.info(
+                        "✅ [CHUNK SEMANTIC] matches=%d | top_similarity=%.3f | query='%s...'",
+                        len(matches),
+                        float(top.get("similarity") or 0.0),
+                        query_text[:60],
+                    )
+                    for i, match in enumerate(matches[:3], 1):
+                        logger.info(
+                            "   ↳ [CHUNK SEMANTIC %d] similarity=%.3f | question='%s...'",
+                            i,
+                            float(match.get("similarity") or 0.0),
+                            (match.get("question_text") or "")[:80],
+                        )
+                else:
+                    logger.info(
+                        "❌ [CHUNK SEMANTIC] no matches | threshold=%.2f | query='%s...'",
+                        threshold,
+                        query_text[:60],
+                    )
+                return matches
+            raise
+    except Exception as e:
+        logger.error(f"Error in chunk question semantic search: {e}", exc_info=True)
+        return []
+
+
+async def get_chunk_questions_by_topic(
+    user_name: str,
+    topics: List[str],
+    limit: int = 5
+) -> List[Dict[str, Any]]:
+    """Topic search over chunk questions (GIN overlap)."""
+    if not settings.SUPABASE_ENABLED or not settings.ENABLE_CHUNK_QUESTION_TOPIC_MATCHING:
+        return []
+    if not topics:
+        return []
+
+    client = get_supabase_client()
+    if not client:
+        return []
+
+    try:
+        normalized_name = user_name.lower().strip()
+        normalized_topics = [t.lower().strip() for t in topics if t and t.strip()]
+        if not normalized_topics:
+            return []
+
+        try:
+            result = client.rpc(
+                "match_chunk_questions_by_topics",
+                {
+                    "filter_user_name": normalized_name,
+                    "limit_count": limit,
+                    "filter_topics": normalized_topics,
+                },
+            ).execute()
+            matches = result.data if result.data else []
+        except Exception as rpc_error:
+            error_str = str(rpc_error).lower()
+            error_code = getattr(rpc_error, "code", None)
+            if error_code == "PGRST202" or "not found" in error_str or "could not find" in error_str:
+                result = (
+                    client.table("session_chunk_questions")
+                    .select("*")
+                    .eq("user_name", normalized_name)
+                    .overlaps("topics", normalized_topics)
+                    .order("created_at", desc=True)
+                    .limit(limit)
+                    .execute()
+                )
+                matches = result.data if result.data else []
+            else:
+                raise
+        if matches:
+            logger.info(
+                "✅ [CHUNK TOPIC] matches=%d | topics=%s",
+                len(matches),
+                normalized_topics,
+            )
+        else:
+            logger.info(
+                "❌ [CHUNK TOPIC] no matches | topics=%s",
+                normalized_topics,
+            )
+        return matches
+    except Exception as e:
+        logger.error(f"Error in chunk question topic search: {e}", exc_info=True)
         return []
 
 
@@ -1449,7 +1685,11 @@ async def batch_generate_embeddings_for_sessions(
     Returns:
         Dict with statistics: {"processed": int, "successful": int, "failed": int, "skipped": int}
     """
-    if not settings.SUPABASE_ENABLED or not settings.ENABLE_SEMANTIC_SEARCH:
+    if (
+        not settings.SUPABASE_ENABLED
+        or not settings.ENABLE_SEMANTIC_SEARCH
+        or not settings.ENABLE_SESSION_EMBEDDINGS
+    ):
         logger.warning("Supabase or semantic search disabled, cannot batch generate embeddings")
         return {"processed": 0, "successful": 0, "failed": 0, "skipped": 0}
     

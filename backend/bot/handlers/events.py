@@ -14,8 +14,10 @@ from bot.services.summary_service import generate_session_summary
 from bot.services.database_service import (
     save_session_summary, check_session_exists,
     get_sessions_by_semantic_search, get_sessions_by_date_range,
-    get_sessions_by_topic, get_all_sessions
+    get_sessions_by_topic, get_all_sessions,
+    save_chunk_question_rows
 )
+from bot.services.chunk_question_index import build_chunk_question_rows
 from bot.services.intent_detector import detect_past_reference_intent
 from bot.services.context_injector import inject_past_context
 from bot.services.context_cache import ContextCache, generate_cache_key
@@ -183,6 +185,18 @@ async def setup_event_handlers(
                 if context_cache:
                     context_cache.invalidate_user(user_name)
                     logger.debug(f"Invalidated cache for {user_name}")
+
+                # Optional: index chunk questions for semantic recall
+                if settings.ENABLE_CHUNK_QUESTION_INDEX:
+                    try:
+                        rows = await build_chunk_question_rows(transcript, user_name, room_name)
+                        if rows:
+                            inserted = await save_chunk_question_rows(rows)
+                            logger.info(f"✅ Indexed {inserted} chunk-question rows for {room_name}")
+                        else:
+                            logger.debug("No chunk questions generated for indexing")
+                    except Exception as e:
+                        logger.error(f"Chunk question indexing failed: {e}", exc_info=True)
             else:
                 logger.error(f"❌ Failed to save session summary for {user_name} (room: {room_name})")
 

@@ -232,6 +232,88 @@ def _format_sessions_for_injection(
     return "".join(context_parts)
 
 
+def inject_chunk_context(
+    context: "OpenAILLMContext",
+    chunks: List[Dict[str, Any]],
+    user_name: str,
+    query_text: Optional[str] = None
+) -> bool:
+    """Inject retrieved chunk context into LLM context."""
+    if not chunks:
+        return False
+
+    try:
+        context_text = _format_chunks_for_injection(chunks, user_name, query_text)
+        estimated_tokens = estimate_tokens(context_text)
+        if estimated_tokens > MAX_INJECTED_CONTEXT_TOKENS:
+            context_text = _truncate_context(context_text, MAX_INJECTED_CONTEXT_TOKENS)
+
+        messages = context.get_messages()
+        if not messages:
+            return False
+
+        system_msg_index = -1
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "system":
+                system_msg_index = i
+                break
+
+        if system_msg_index >= 0:
+            current_content = messages[system_msg_index].get("content", "")
+            messages[system_msg_index]["content"] = current_content + "\n\n" + context_text
+        else:
+            messages.insert(0, {"role": "system", "content": context_text})
+
+        return True
+    except Exception as e:
+        logger.error(f"Error injecting chunk context: {e}", exc_info=True)
+        return False
+
+
+def _format_chunks_for_injection(
+    chunks: List[Dict[str, Any]],
+    user_name: str,
+    query_text: Optional[str] = None
+) -> str:
+    """Format chunk results into context string for injection."""
+    parts = []
+    if query_text:
+        parts.append(
+            f"## ADDITIONAL CONTEXT (Retrieved for: \"{query_text}\")\n"
+        )
+        parts.append(
+            f"**IMPORTANT**: {user_name} asked: \"{query_text}\"\n"
+            "Use ONLY the chunks below to answer their question precisely.\n\n"
+        )
+    else:
+        parts.append("## ADDITIONAL CONTEXT (Retrieved Conversation Chunks)\n")
+
+    parts.append(
+        "You have access to relevant conversation chunks. "
+        "Use them to answer the user's specific question.\n\n"
+    )
+
+    for i, chunk in enumerate(chunks, 1):
+        chunk_text = chunk.get("chunk_text", "")
+        question_text = chunk.get("question_text", "")
+        session_summary = chunk.get("session_summary", "")
+        session_date = chunk.get("session_date", "")
+        similarity = chunk.get("similarity")
+        similarity_str = f"{similarity:.3f}" if isinstance(similarity, (int, float)) else "N/A"
+        parts.append(f"**Chunk {i}** (relevance: {similarity_str})\n")
+        if question_text:
+            parts.append(f"Matched question: {question_text}\n")
+        if chunk_text:
+            parts.append(f"Chunk: {chunk_text}\n\n")
+        if session_summary and settings.ENABLE_CHUNK_SESSION_SUMMARY:
+            if session_date:
+                parts.append(f"Session summary ({session_date}): {session_summary}\n\n")
+            else:
+                parts.append(f"Session summary: {session_summary}\n\n")
+
+    return "".join(parts)
+
+
 def _truncate_context(context_text: str, max_tokens: int) -> str:
     """Truncate context text to fit within token limit.
     

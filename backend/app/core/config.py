@@ -89,7 +89,7 @@ class Settings(BaseSettings):
 
     # Context Management
     MAX_PAST_SESSIONS: int = Field(
-        default=2, description="Maximum past sessions to include in context"
+        default=1, description="Maximum past sessions to include in context"
     )
     MAX_PAST_CONTEXT_SIZE: int = Field(
         default=8000, description="Maximum past context size in characters"
@@ -163,6 +163,13 @@ class Settings(BaseSettings):
     ENABLE_SEMANTIC_SEARCH: bool = Field(
         default=True, description="Enable semantic search with embeddings"
     )
+    ENABLE_SESSION_EMBEDDINGS: bool = Field(
+        default=False,
+        description="Enable generating/storing embeddings for session summaries",
+    )
+    ENABLE_TOPIC_MATCHING: bool = Field(
+        default=True, description="Enable topic-based matching in retrieval"
+    )
     EMBEDDING_MODEL: str = Field(
         default="local", description="Embedding model name (use 'local' for Sentence Transformers)"
     )
@@ -180,6 +187,44 @@ class Settings(BaseSettings):
     )
     ENABLE_LLM_TOPIC_FALLBACK: bool = Field(
         default=True, description="Enable LLM-based topic extraction fallback when keyword extraction returns no topics"
+    )
+
+    # Chunk Question Index (for semantic recall without session embeddings)
+    ENABLE_CHUNK_QUESTION_INDEX: bool = Field(
+        default=True, description="Enable chunk question indexing for recall"
+    )
+    ENABLE_CHUNK_QUESTION_SEMANTIC_MATCHING: bool = Field(
+        default=True, description="Enable semantic matching over chunk questions"
+    )
+    ENABLE_CHUNK_QUESTION_TOPIC_MATCHING: bool = Field(
+        default=True, description="Enable topic matching over chunk questions"
+    )
+    CHUNK_QUESTION_SEMANTIC_THRESHOLD: float = Field(
+        default=0.7, description="Minimum similarity for chunk question matches"
+    )
+    CHUNK_QUESTION_COUNT: int = Field(
+        default=3, description="Number of questions to generate per transcript chunk"
+    )
+    CHUNK_MAX_MESSAGES: int = Field(
+        default=6, description="Max messages per transcript chunk for question generation"
+    )
+    CHUNK_MAX_TEXT_CHARS: int = Field(
+        default=1200, description="Max characters per chunk used for question generation"
+    )
+    CHUNK_QUESTION_MAX_RESULTS: int = Field(
+        default=5, description="Max chunk question matches to retrieve"
+    )
+    CHUNK_QUESTION_MODEL: str = Field(
+        default="llama-3.1-8b-instant",
+        description="Model to use for chunk question generation",
+    )
+    ENABLE_SESSION_FALLBACK: bool = Field(
+        default=False,
+        description="Allow session-summary retrieval when chunk matching finds nothing",
+    )
+    ENABLE_CHUNK_SESSION_SUMMARY: bool = Field(
+        default=False,
+        description="Include session summary when injecting matched chunks",
     )
 
     # Security

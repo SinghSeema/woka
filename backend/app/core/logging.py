@@ -6,6 +6,8 @@ from typing import Optional
 
 from app.core.config import settings
 
+_LOGGING_CONFIGURED = False
+
 
 def setup_logging(log_level: Optional[str] = None) -> None:
     """Configure application logging.
@@ -14,19 +16,28 @@ def setup_logging(log_level: Optional[str] = None) -> None:
         log_level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL).
                   If None, uses environment-based default.
     """
+    global _LOGGING_CONFIGURED
+    if _LOGGING_CONFIGURED:
+        return
+
     if log_level is None:
         # Always default to INFO to avoid noisy DEBUG logs from third-party libraries
         log_level = "INFO"
 
     # Configure root logger
-    logging.basicConfig(
-        level=getattr(logging, log_level.upper()),
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-        ],
-    )
+    root_logger = logging.getLogger()
+    if root_logger.handlers:
+        root_logger.setLevel(getattr(logging, log_level.upper()))
+    else:
+        logging.basicConfig(
+            level=getattr(logging, log_level.upper()),
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+            handlers=[
+                logging.StreamHandler(sys.stdout),
+            ],
+        )
+    _LOGGING_CONFIGURED = True
 
     # Set specific logger levels - suppress verbose third-party logs
     logging.getLogger("uvicorn").setLevel(logging.WARNING)

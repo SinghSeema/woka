@@ -29,8 +29,11 @@ from bot.services.database_service import (
     get_sessions_by_date_range,
     get_sessions_by_topic,
     get_all_sessions,
+    get_chunk_questions_by_semantic_search,
+    get_chunk_questions_by_topic,
+    get_sessions_by_room_names,
 )
-from bot.services.context_injector import inject_past_context
+from bot.services.context_injector import inject_past_context, inject_chunk_context
 from bot.services.filler_generator import generate_filler
 from bot.services.context_cache import ContextCache, generate_cache_key
 
@@ -53,11 +56,16 @@ class PastContextProcessor(FrameProcessor):
         self._context_cache = context_cache
         self._shadow_memory = shadow_memory
         self._processed_queries = set()
+        self._instance_id = hex(id(self))
         
         logger.debug(
-            f"PastContextProcessor initialized: user={user_name}, room={room_name}, "
-            f"ENABLE_DYNAMIC_CONTEXT={settings.ENABLE_DYNAMIC_CONTEXT}, "
-            f"ENABLE_SEMANTIC_SEARCH={settings.ENABLE_SEMANTIC_SEARCH}"
+            "PastContextProcessor initialized: user=%s, room=%s, instance=%s, "
+            "ENABLE_DYNAMIC_CONTEXT=%s, ENABLE_SEMANTIC_SEARCH=%s",
+            user_name,
+            room_name,
+            self._instance_id,
+            settings.ENABLE_DYNAMIC_CONTEXT,
+            settings.ENABLE_SEMANTIC_SEARCH,
         )
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
@@ -110,6 +118,14 @@ class PastContextProcessor(FrameProcessor):
                 await self.push_frame(frame, direction)
                 return
 
+            logger.info(
+                "🔍 [PAST CONTEXT] frame=%s | instance=%s | msg_hash=%s | user='%s...'",
+                frame_type,
+                self._instance_id,
+                hash(user_message),
+                user_message[:80],
+            )
+
             if not settings.ENABLE_DYNAMIC_CONTEXT:
                 await self.push_frame(frame, direction)
                 return
@@ -142,6 +158,7 @@ class PastContextProcessor(FrameProcessor):
         logger.debug(f"Detected intent '{intent.intent_type}' for query: '{user_message[:50]}...'")
 
         sessions: List[Dict[str, Any]] = []
+        chunk_matches: List[Dict[str, Any]] = []
 
         # 2) Check Shadow Memory / ContextCache first (fast path, no DB).
         cache_key = generate_cache_key(
@@ -155,10 +172,13 @@ class PastContextProcessor(FrameProcessor):
             cached = self._context_cache.get(self._user_name, cache_key)
             if cached:
                 logger.debug(f"Cache hit for query: {cache_key}")
-                sessions = cached
+                if cached and isinstance(cached, list) and cached[0].get("chunk_text"):
+                    chunk_matches = cached
+                else:
+                    sessions = cached
 
         try:
-            if not sessions:
+            if not sessions and not chunk_matches:
                 logger.debug(f"Cache miss for query: {cache_key}")
 
                 # Send filler immediately to keep user engaged while we query DB.
@@ -175,13 +195,67 @@ class PastContextProcessor(FrameProcessor):
 
                 # Choose retrieval strategy based on intent type.
                 if intent.intent_type == "date" and intent.date_range:
-                    sessions = await get_sessions_by_date_range(
-                        self._user_name,
-                        intent.date_range["start"],
-                        intent.date_range["end"],
-                    )
+                    if settings.ENABLE_SESSION_FALLBACK:
+                        sessions = await get_sessions_by_date_range(
+                            self._user_name,
+                            intent.date_range["start"],
+                            intent.date_range["end"],
+                        )
                 elif intent.intent_type == "topic" and intent.topics:
-                    if settings.ENABLE_SEMANTIC_SEARCH and intent.topics:
+                    logger.info(
+                        "🔎 [PAST CONTEXT] intent=topic | topics=%s | user=%s",
+                        intent.topics,
+                        self._user_name,
+                    )
+                    # Chunk-question semantic search (preferred for recall)
+                    if (
+                        settings.ENABLE_CHUNK_QUESTION_INDEX
+                        and settings.ENABLE_CHUNK_QUESTION_SEMANTIC_MATCHING
+                    ):
+                        original_query = intent.query_text.strip() if intent.query_text else " ".join(intent.topics)
+                        semantic_query = expand_query_for_search(original_query, intent)
+                        chunk_matches = await get_chunk_questions_by_semantic_search(
+                            self._user_name,
+                            semantic_query,
+                            limit=getattr(settings, "CHUNK_QUESTION_MAX_RESULTS", 5),
+                            threshold=getattr(settings, "CHUNK_QUESTION_SEMANTIC_THRESHOLD", 0.7),
+                            topics=intent.topics if settings.ENABLE_CHUNK_QUESTION_TOPIC_MATCHING else None,
+                        )
+                        logger.info(
+                            "🔎 [PAST CONTEXT] chunk-semantic | query='%s...' | results=%d",
+                            semantic_query[:80],
+                            len(chunk_matches),
+                        )
+
+                    # Chunk-question topic match fallback
+                    if (
+                        not chunk_matches
+                        and settings.ENABLE_CHUNK_QUESTION_INDEX
+                        and settings.ENABLE_CHUNK_QUESTION_TOPIC_MATCHING
+                    ):
+                        chunk_matches = await get_chunk_questions_by_topic(
+                            self._user_name,
+                            intent.topics,
+                            limit=getattr(settings, "CHUNK_QUESTION_MAX_RESULTS", 5),
+                        )
+                        logger.info(
+                            "🔎 [PAST CONTEXT] chunk-topic | topics=%s | results=%d",
+                            intent.topics,
+                            len(chunk_matches),
+                        )
+                    if chunk_matches:
+                        logger.info(
+                            "✅ [CHUNK MATCH] intent=topic | results=%d | topics=%s",
+                            len(chunk_matches),
+                            intent.topics,
+                        )
+
+                    if (
+                        settings.ENABLE_SESSION_FALLBACK
+                        and settings.ENABLE_SEMANTIC_SEARCH
+                        and settings.ENABLE_SESSION_EMBEDDINGS
+                        and intent.topics
+                    ):
                         # Use full original query text for semantic search (better embeddings)
                         # Topics are used for pre-filtering, not for query construction
                         filtered_topics = [t for t in intent.topics if t and len(t.strip()) > 2]
@@ -211,7 +285,12 @@ class PastContextProcessor(FrameProcessor):
                             topics=filtered_topics,  # Pass topics for pre-filtering
                             shadow_memory=self._shadow_memory,
                         )
-                    if not sessions and intent.topics:
+                    if (
+                        settings.ENABLE_SESSION_FALLBACK
+                        and not sessions
+                        and intent.topics
+                        and settings.ENABLE_TOPIC_MATCHING
+                    ):
                         sessions = await get_sessions_by_topic(
                             self._user_name,
                             intent.topics,
@@ -220,7 +299,44 @@ class PastContextProcessor(FrameProcessor):
                 elif intent.intent_type == "semantic" or (
                     intent.intent_type == "general" and intent.query_text
                 ):
-                    if settings.ENABLE_SEMANTIC_SEARCH and intent.query_text:
+                    logger.info(
+                        "🔎 [PAST CONTEXT] intent=%s | query='%s...'",
+                        intent.intent_type,
+                        intent.query_text[:80] if intent.query_text else "",
+                    )
+                    if (
+                        settings.ENABLE_CHUNK_QUESTION_INDEX
+                        and settings.ENABLE_CHUNK_QUESTION_SEMANTIC_MATCHING
+                        and intent.query_text
+                    ):
+                        original_query = intent.query_text.strip()
+                        semantic_query = expand_query_for_search(original_query, intent)
+                        chunk_matches = await get_chunk_questions_by_semantic_search(
+                            self._user_name,
+                            semantic_query,
+                            limit=getattr(settings, "CHUNK_QUESTION_MAX_RESULTS", 5),
+                            threshold=getattr(settings, "CHUNK_QUESTION_SEMANTIC_THRESHOLD", 0.7),
+                            topics=intent.topics if settings.ENABLE_CHUNK_QUESTION_TOPIC_MATCHING else None,
+                        )
+                        logger.info(
+                            "🔎 [PAST CONTEXT] chunk-semantic | query='%s...' | results=%d",
+                            semantic_query[:80],
+                            len(chunk_matches),
+                        )
+                        if chunk_matches:
+                            logger.info(
+                                "✅ [CHUNK MATCH] intent=%s | results=%d | query='%s...'",
+                                intent.intent_type,
+                                len(chunk_matches),
+                                semantic_query[:60],
+                            )
+
+                    if (
+                        settings.ENABLE_SESSION_FALLBACK
+                        and settings.ENABLE_SEMANTIC_SEARCH
+                        and settings.ENABLE_SESSION_EMBEDDINGS
+                        and intent.query_text
+                    ):
                         # Expand query for better embedding quality
                         original_query = intent.query_text.strip()
                         semantic_query = expand_query_for_search(original_query, intent)
@@ -243,13 +359,21 @@ class PastContextProcessor(FrameProcessor):
 
                 # Fallback: if user explicitly asked for history and search found 0,
                 # just grab the most recent sessions anyway.
-                if not sessions and intent.has_intent:
+                if (
+                    settings.ENABLE_SESSION_FALLBACK
+                    and not sessions
+                    and not chunk_matches
+                    and intent.has_intent
+                ):
                     sessions = await get_all_sessions(
                         self._user_name, limit=settings.MAX_DYNAMIC_SESSIONS
                     )
 
                 query_duration = (datetime.now() - query_start).total_seconds() * 1000
-                logger.debug(f"Context fetch: {query_duration:.0f}ms, found {len(sessions)} sessions")
+                logger.debug(
+                    f"Context fetch: {query_duration:.0f}ms, "
+                    f"chunks={len(chunk_matches)}, sessions={len(sessions)}"
+                )
 
                 # Record event in Langfuse (non-blocking helper).
                 record_context_fetch_event(
@@ -257,15 +381,39 @@ class PastContextProcessor(FrameProcessor):
                     room_name=self._room_name,
                     intent_type=intent.intent_type or "unknown",
                     query_text=intent.query_text,
-                    sessions_found=len(sessions),
+                    sessions_found=len(chunk_matches) if chunk_matches else len(sessions),
                     duration_ms=query_duration,
                 )
 
+                # If server-side join returns session summary, normalize fields
+                if chunk_matches:
+                    for match in chunk_matches:
+                        if match.get("session_summary"):
+                            created_at = match.get("session_created_at")
+                            if created_at and not match.get("session_date"):
+                                try:
+                                    dt = datetime.fromisoformat(str(created_at).replace('Z', '+00:00'))
+                                    match["session_date"] = dt.strftime("%B %d, %Y")
+                                except Exception:
+                                    match["session_date"] = str(created_at)[:10]
+
                 # Cache results for future queries
-                if self._context_cache and sessions:
+                if self._context_cache and chunk_matches:
+                    self._context_cache.set(self._user_name, cache_key, chunk_matches)
+                elif self._context_cache and sessions:
                     self._context_cache.set(self._user_name, cache_key, sessions)
 
-            # 4) Inject context if we have sessions.
+            # 4) Inject context if we have chunks or sessions.
+            if chunk_matches:
+                success = inject_chunk_context(
+                    self._context,
+                    chunk_matches,
+                    self._user_name,
+                    query_text=intent.query_text,
+                )
+                logger.debug(f"Injected {len(chunk_matches)} chunks into context: success={success}")
+                return success
+
             if sessions:
                 success = inject_past_context(
                     self._context,
