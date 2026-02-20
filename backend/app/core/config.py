@@ -24,11 +24,15 @@ class Settings(BaseSettings):
     """Application settings with environment variable support."""
 
     model_config = SettingsConfigDict(
+        # IMPORTANT: In Cloud Run, environment variables take precedence over .env file
+        # This ensures Cloud Run secrets override any .env file values
         env_file=str(_env_file) if _env_file.exists() else None,
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
         env_nested_delimiter="__",
+        # Environment variables override .env file (this is the default, but being explicit)
+        env_ignore_empty=True,
     )
 
     # Application
@@ -80,7 +84,7 @@ class Settings(BaseSettings):
     # Bot Configuration
     BOT_NAME: str = Field(default="Woka", description="Bot display name")
     VAD_THRESHOLD: float = Field(default=0.5, description="Voice Activity Detection threshold")
-    NUM_IDLE_PROCESSES: int = Field(default=1, description="Number of pre-warmed bot processes")
+    NUM_IDLE_PROCESSES: int = Field(default=0, description="Number of pre-warmed bot processes")
 
     # Session History (Supabase)
     SUPABASE_URL: Optional[str] = Field(default=None, description="Supabase project URL")

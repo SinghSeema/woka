@@ -7,8 +7,11 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 
 # Install dependencies
-# Use npm install instead of npm ci since package-lock.json might not exist
-RUN npm install
+# Using BuildKit cache mount to cache npm packages between builds
+# This cache persists even when package.json changes
+# Use npm ci for faster, reproducible builds if package-lock.json exists
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --prefer-offline --no-audit || npm install --prefer-offline --no-audit
 
 # Copy source code
 COPY . .
@@ -22,7 +25,9 @@ ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
 ENV VITE_LIVEKIT_URL=${VITE_LIVEKIT_URL}
 
 # Build the app
-RUN npm run build
+# Cache node_modules/.cache for Vite build cache
+RUN --mount=type=cache,target=/app/node_modules/.cache \
+    npm run build
 
 # Production stage - serve static files
 FROM nginx:alpine

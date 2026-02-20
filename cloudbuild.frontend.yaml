@@ -1,0 +1,32 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    env:
+      - DOCKER_BUILDKIT=1
+    args:
+      - build
+      - --build-arg
+      - BUILDKIT_INLINE_CACHE=1
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/woka-frontend:${_TAG}
+      - -f
+      - frontend/Dockerfile
+      - --build-arg
+      - VITE_API_BASE_URL=${_API_BASE_URL}
+      - --build-arg
+      - VITE_API_PREFIX=/api/v1
+      - frontend
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/woka-frontend:${_TAG}
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/woka-frontend:${_TAG}
+
+substitutions:
+  _REGION: asia-south1
+  _REPO: woka-repo
+  _API_BASE_URL: https://example-backend-url.run.app
+  _TAG: latest
+
+

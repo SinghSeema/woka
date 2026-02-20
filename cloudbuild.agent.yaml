@@ -1,0 +1,43 @@
+steps:
+  # Build the agent Docker image
+  - name: gcr.io/cloud-builders/docker
+    entrypoint: bash
+    args:
+      - '-c'
+      - |
+        docker build \
+          --build-arg BUILDKIT_INLINE_CACHE=1 \
+          --cache-from ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/woka-agent:latest \
+          -t ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/woka-agent:${_TAG} \
+          -f Dockerfile.agent \
+          .
+    env:
+      - 'DOCKER_BUILDKIT=1'
+
+  # Push to Artifact Registry
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - 'push'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/woka-agent:${_TAG}'
+
+  # Tag as latest
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - 'tag'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/woka-agent:${_TAG}'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/woka-agent:latest'
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - 'push'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/woka-agent:latest'
+
+substitutions:
+  _REGION: asia-south1
+  _REPO: woka-repo
+  _TAG: latest
+
+options:
+  machineType: 'E2_HIGHCPU_8'
+  logging: CLOUD_LOGGING_ONLY
+

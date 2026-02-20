@@ -323,3 +323,5 @@ After fixes, verify:
 4. **Error Logging**: Current approach prioritizes performance (fewer logs) over debuggability. Consider adding a "verbose" mode for detailed diagnostics.
 
 
+
+

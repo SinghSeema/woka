@@ -1,0 +1,27 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    env:
+      - DOCKER_BUILDKIT=1
+    args:
+      - build
+      - --build-arg
+      - BUILDKIT_INLINE_CACHE=1
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/woka-backend:${_TAG}
+      - -f
+      - Dockerfile
+      - .
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/woka-backend:${_TAG}
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/woka-backend:${_TAG}
+
+substitutions:
+  _REGION: asia-south1
+  _REPO: woka-repo
+  _TAG: latest
+
+

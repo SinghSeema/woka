@@ -23,7 +23,8 @@ function ConnectingContent({ onReady, onError }) {
   const [checkCount, setCheckCount] = useState(0);
   const hasBeenConnectedRef = useRef(false);
   const errorSentRef = useRef(false);
-  const BOT_JOIN_MAX_CHECKS = 20; // ~20s max wait after connected
+  // Bot cold-start + model/service warmup can exceed 20s in local Docker.
+  const BOT_JOIN_MAX_CHECKS = 45; // ~45s max wait after connected
 
   // Track elapsed time
   useEffect(() => {

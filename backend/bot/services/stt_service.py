@@ -6,7 +6,7 @@ from pathlib import Path
 backend_dir = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(backend_dir))
 
-from pipecat.services.deepgram import DeepgramSTTService
+from pipecat.services.deepgram.stt import DeepgramSTTService
 
 from app.core.config import settings
 from app.core.logging import get_logger

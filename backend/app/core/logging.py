@@ -82,7 +82,8 @@ def setup_logging(log_level: Optional[str] = None) -> None:
     # Suppress other verbose libraries
     logging.getLogger("asyncio").setLevel(logging.ERROR)
     logging.getLogger("websockets").setLevel(logging.WARNING)
-    logging.getLogger("livekit.agents").setLevel(logging.WARNING)
+    # Temporarily keep worker framework logs verbose for Cloud diagnostics.
+    logging.getLogger("livekit.agents").setLevel(logging.INFO)
     logging.getLogger("livekit.rtc").setLevel(logging.WARNING)
     logging.getLogger("livekit.protocol").setLevel(logging.ERROR)
     
@@ -102,9 +103,9 @@ def setup_logging(log_level: Optional[str] = None) -> None:
     logging.getLogger("huggingface_hub.file_download").setLevel(logging.ERROR)
     logging.getLogger("huggingface_hub.hf_api").setLevel(logging.ERROR)
     
-    # Suppress verbose bot main module logs
-    logging.getLogger("__mp_main__").setLevel(logging.WARNING)
-    logging.getLogger("bot.main").setLevel(logging.WARNING)
+    # Keep bot process lifecycle logs visible for worker registration diagnostics
+    logging.getLogger("__mp_main__").setLevel(logging.INFO)
+    logging.getLogger("bot.main").setLevel(logging.INFO)
     
     # Suppress embedding / context / summary verbose logs from our own services,
     # even when the root logger is set to DEBUG for troubleshooting.

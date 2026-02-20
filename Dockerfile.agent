@@ -1,23 +1,18 @@
-FROM python:3.11-slim AS backend
+# Dockerfile for LiveKit Agent Worker (separate service)
+FROM python:3.11-slim
 
 WORKDIR /app
 
-# System deps for building some Python wheels (httpx, uvicorn extras, etc.)
+# System deps for building some Python wheels
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install CPU-only PyTorch first to avoid downloading CUDA libraries (~2GB+)
-# This must be done before installing sentence-transformers
-# Increased timeout (300s) and retries (3) for large package downloads
-# Using BuildKit cache mount to cache pip downloads between builds
+# Install CPU-only PyTorch first
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --timeout=300 --retries=3 --index-url https://download.pytorch.org/whl/cpu torch
 
 # Copy backend requirements and install
-# Increased timeout (300s) and retries (3) for network reliability
-# Using BuildKit cache mount to cache pip downloads between builds
-# This cache persists even when requirements.txt changes
 COPY backend/requirements.txt /app/backend/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --timeout=300 --retries=3 -r /app/backend/requirements.txt
@@ -25,8 +20,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Copy backend source
 COPY backend /app/backend
 
-# Pre-download Silero VAD model during build to avoid runtime download delays
-# This makes the image larger but significantly speeds up container startup
+# Pre-download Silero VAD model during build
 RUN python3 -c "import sys; sys.path.insert(0, '/app/backend'); \
     import os; \
     os.environ['TRANSFORMERS_VERBOSITY'] = 'error'; \
@@ -37,14 +31,18 @@ RUN python3 -c "import sys; sys.path.insert(0, '/app/backend'); \
     print('✅ VAD model downloaded and cached')" || \
     (echo "⚠️  VAD model download failed, will download on first use" && exit 0)
 
-# Default envs (can be overridden by host)
+# Default envs
 ENV PYTHONUNBUFFERED=1 \
     ENVIRONMENT=production \
-    PYTHONPATH=/app/backend
+    PYTHONPATH=/app/backend \
+    PORT=8080
 
-# Expose API port
-EXPOSE 8000
+# Expose port for Cloud Run health checks (agent doesn't use it, but Cloud Run requires it)
+EXPOSE 8080
 
-# FastAPI backend only - bot worker runs in separate service (woka-agent)
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Agent worker with health check server
+# Cloud Run requires a service to listen on PORT, so we run both:
+# 1. Simple HTTP health check server on PORT (for Cloud Run)
+# 2. Bot worker (connects to LiveKit Cloud)
+CMD ["bash", "-lc", "python3 -m http.server ${PORT:-8080} --bind 0.0.0.0 > /dev/null 2>&1 & python -m bot.main start"]
 

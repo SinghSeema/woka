@@ -1,0 +1,26 @@
+# Exclude heavy/local-only files from Cloud Build source uploads
+.git
+.gitignore
+.gcloudignore
+.env
+.env.*
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+node_modules/
+frontend/node_modules/
+backend/venv/
+venv/
+.venv/
+.pipebot/
+.pipeBot/
+password/
+dist/
+build/
+logs/
+livekit-certs/
+docs/
+
+
