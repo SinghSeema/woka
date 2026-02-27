@@ -26,7 +26,7 @@ images:
 substitutions:
   _REGION: asia-south1
   _REPO: woka-repo
-  _API_BASE_URL: https://example-backend-url.run.app
+  _API_BASE_URL: https://woka-backend-melpdy44ga-el.a.run.app
   _TAG: latest
 
 

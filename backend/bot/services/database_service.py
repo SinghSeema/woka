@@ -26,6 +26,33 @@ logger = get_logger(__name__)
 _supabase_client = None
 
 
+# ---------------------------------------------------------------------------
+# Security: user isolation guard
+# ---------------------------------------------------------------------------
+
+def _assert_user_name(user_name: str) -> str:
+    """Normalize and validate user_name before any DB query.
+
+    SECURITY: Every database function MUST call this before querying.
+    An empty or None user_name would cause cross-user data leaks.
+
+    Args:
+        user_name: Raw user name string
+
+    Returns:
+        Normalized (lowercased, stripped) user name
+
+    Raises:
+        ValueError: If user_name is empty or None
+    """
+    if not user_name or not user_name.strip():
+        raise ValueError(
+            "user_name is required for all database queries — "
+            "an empty user_name would expose other users' data."
+        )
+    return user_name.lower().strip()
+
+
 def get_supabase_client():
     """Get or create Supabase client.
 
@@ -153,6 +180,14 @@ async def search_cached_embeddings(
             embedding = item.get("embedding")
             
             if not summary or not embedding:
+                continue
+            
+            # SECURITY: verify item belongs to this user (cache contamination guard)
+            item_user = item.get("user_name")
+            if item_user and user_name and item_user.lower().strip() != user_name.lower().strip():
+                logger.warning(
+                    f"⚠️  SECURITY: Cache contamination detected — skipping session "                    f"belonging to '{item_user}' while querying for '{user_name}'"
+                )
                 continue
             
             # Convert embedding to List[float] if needed (should already be parsed, but handle edge cases)
@@ -318,8 +353,12 @@ async def save_session_summary(
         return False
 
     try:
-        # Normalize user name for consistent lookups
-        normalized_name = user_name.lower().strip()
+        # SECURITY: assert user_name is valid before querying
+        try:
+            normalized_name = _assert_user_name(user_name)
+        except ValueError as e:
+            logger.error(f"❌ SECURITY: {e}")
+            return False
         
         # Validate inputs
         if not summary or len(summary.strip()) < 10:
@@ -460,11 +499,11 @@ async def get_past_sessions(user_name: str, limit: int = 2) -> List[Dict[str, An
         return []
 
     try:
-        # Normalize user name for consistent lookups
-        normalized_name = user_name.lower().strip()
-        
-        if not normalized_name:
-            logger.warning("User name is empty, cannot retrieve past sessions")
+        # SECURITY: assert user_name is valid before querying
+        try:
+            normalized_name = _assert_user_name(user_name)
+        except ValueError as e:
+            logger.error(f"❌ SECURITY: {e}")
             return []
 
         result = (
@@ -519,9 +558,11 @@ async def get_past_session_embeddings(user_name: str, limit: int = 3) -> List[Di
         return []
 
     try:
-        normalized_name = user_name.lower().strip()
-        
-        if not normalized_name:
+        # SECURITY: assert user_name is valid before querying
+        try:
+            normalized_name = _assert_user_name(user_name)
+        except ValueError as e:
+            logger.error(f"❌ SECURITY: {e}")
             return []
 
         # OPTIMIZATION: Select only summary and embedding (not full session data)
@@ -643,12 +684,16 @@ async def _expand_query_topics_with_semantic_matching(
     try:
         from bot.services.llm_topic_extractor import match_topics_semantically
         
-        # Get all unique stored topics for this user
         client = get_supabase_client()
         if not client:
-            return query_topics  # Fallback to original topics
-        
-        normalized_name = user_name.lower().strip()
+            return query_topics
+
+        # SECURITY: assert user_name is valid before querying
+        try:
+            normalized_name = _assert_user_name(user_name)
+        except ValueError as e:
+            logger.error(f"❌ SECURITY: {e}")
+            return query_topics
         
         # Get all sessions for this user to collect stored topics
         result = (
@@ -744,12 +789,16 @@ async def get_sessions_by_semantic_search(
             )
             return []
         
-        # Get Supabase client
         client = get_supabase_client()
         if not client:
             return []
         
-        normalized_name = user_name.lower().strip()
+        # SECURITY: assert user_name is valid before querying
+        try:
+            normalized_name = _assert_user_name(user_name)
+        except ValueError as e:
+            logger.error(f"❌ SECURITY: {e}")
+            return []
         
         # Prepare parameters for hybrid_search_sessions function
         params = {
@@ -877,7 +926,12 @@ async def get_sessions_by_date_range(
         return []
     
     try:
-        normalized_name = user_name.lower().strip()
+        # SECURITY: assert user_name is valid before querying
+        try:
+            normalized_name = _assert_user_name(user_name)
+        except ValueError as e:
+            logger.error(f"❌ SECURITY: {e}")
+            return []
         
         # Format dates for Supabase query
         start_str = start_date.isoformat()
@@ -938,7 +992,12 @@ async def _fallback_keyword_search_DEPRECATED(
         return []
     
     try:
-        normalized_name = user_name.lower().strip()
+        # SECURITY: assert user_name is valid before querying
+        try:
+            normalized_name = _assert_user_name(user_name)
+        except ValueError as e:
+            logger.error(f"❌ SECURITY: {e}")
+            return []
         
         # Extract keywords from query text (remove stop words)
         stop_words = {
@@ -1091,7 +1150,12 @@ async def get_sessions_by_room_names(
         return []
 
     try:
-        normalized_name = user_name.lower().strip()
+        # SECURITY: assert user_name is valid before querying
+        try:
+            normalized_name = _assert_user_name(user_name)
+        except ValueError as e:
+            logger.error(f"❌ SECURITY: {e}")
+            return []
         unique_rooms = list({r for r in room_names if r})
         if not unique_rooms:
             return []
@@ -1117,7 +1181,12 @@ async def get_sessions_by_room_names(
         return []
     
     try:
-        normalized_name = user_name.lower().strip()
+        # SECURITY: assert user_name is valid before querying
+        try:
+            normalized_name = _assert_user_name(user_name)
+        except ValueError as e:
+            logger.error(f"❌ SECURITY: {e}")
+            return []
         normalized_topics = [t.lower().strip() for t in topics if t and t.strip()]
         
         if not normalized_topics:
@@ -1258,7 +1327,12 @@ async def get_chunk_questions_by_semantic_search(
         if not query_embedding:
             return []
 
-        normalized_name = user_name.lower().strip()
+        # SECURITY: assert user_name is valid before querying
+        try:
+            normalized_name = _assert_user_name(user_name)
+        except ValueError as e:
+            logger.error(f"❌ SECURITY: {e}")
+            return []
         params = {
             "query_embedding": query_embedding,
             "filter_user_name": normalized_name,
@@ -1343,7 +1417,12 @@ async def get_chunk_questions_by_topic(
         return []
 
     try:
-        normalized_name = user_name.lower().strip()
+        # SECURITY: assert user_name is valid before querying
+        try:
+            normalized_name = _assert_user_name(user_name)
+        except ValueError as e:
+            logger.error(f"❌ SECURITY: {e}")
+            return []
         normalized_topics = [t.lower().strip() for t in topics if t and t.strip()]
         if not normalized_topics:
             return []
@@ -1411,7 +1490,12 @@ async def get_all_sessions(user_name: str, limit: int = 5) -> List[Dict[str, Any
         return []
     
     try:
-        normalized_name = user_name.lower().strip()
+        # SECURITY: assert user_name is valid before querying
+        try:
+            normalized_name = _assert_user_name(user_name)
+        except ValueError as e:
+            logger.error(f"❌ SECURITY: {e}")
+            return []
         
         result = (
             client.table("sessions")
@@ -1708,7 +1792,12 @@ async def batch_generate_embeddings_for_sessions(
         query = client.table("sessions").select("id, summary, embedding_model")
         
         if user_name:
-            query = query.eq("user_name", user_name.lower().strip())
+            try:
+                _normalized = _assert_user_name(user_name)
+            except ValueError as e:
+                logger.error(f"❌ SECURITY: {e}")
+                return {"processed": 0, "successful": 0, "failed": 0, "skipped": 0}
+            query = query.eq("user_name", _normalized)
         
         # Filter: no embedding OR embedding_model is NULL OR embedding_model != current_model
         # Note: Supabase doesn't support OR directly, so we'll fetch and filter in Python

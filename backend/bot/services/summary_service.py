@@ -94,7 +94,7 @@ Comprehensive summary:"""
                         "messages": [
                             {
                                 "role": "system",
-                                "content": "You are an expert at creating comprehensive, context-rich summaries of wellness coaching conversations. Your summaries are used to help an AI coach remember past sessions and provide continuity. Focus on capturing specific details, goals, progress, and actionable information that would be valuable in future conversations.",
+                                "content": "You are an expert at creating comprehensive, context-rich summaries of wellness coaching conversations. Your summaries are used to help an AI coach remember past sessions and provide continuity. Focus on capturing specific details, goals, progress, and actionable information that would be valuable in future conversations. Always write summaries in English regardless of the language spoken in the conversation.",
                             },
                             {"role": "user", "content": summary_prompt},
                         ],

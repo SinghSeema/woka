@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     # LiveKit
     LIVEKIT_API_KEY: str = Field(..., description="LiveKit API key")
     LIVEKIT_API_SECRET: str = Field(..., description="LiveKit API secret")
-    LIVEKIT_URL: str = Field(default="ws://127.0.0.1:7880", description="LiveKit WebSocket URL (for agent connection)")
+    LIVEKIT_URL: str = Field(default="", description="LiveKit WebSocket URL — must be set via env var in production")
     LIVEKIT_PUBLIC_URL: Optional[str] = Field(
         default=None, 
         description="LiveKit public WebSocket URL (for frontend, defaults to LIVEKIT_URL if not set)"
@@ -84,7 +84,7 @@ class Settings(BaseSettings):
     # Bot Configuration
     BOT_NAME: str = Field(default="Woka", description="Bot display name")
     VAD_THRESHOLD: float = Field(default=0.5, description="Voice Activity Detection threshold")
-    NUM_IDLE_PROCESSES: int = Field(default=0, description="Number of pre-warmed bot processes")
+    NUM_IDLE_PROCESSES: int = Field(default=0, description="Pre-warmed bot processes. Set to 1 once memory usage is confirmed stable (idle ~150MB with VAD only). 0 = safe default.")
 
     # Session History (Supabase)
     SUPABASE_URL: Optional[str] = Field(default=None, description="Supabase project URL")
@@ -197,6 +197,27 @@ class Settings(BaseSettings):
     ENABLE_CHUNK_QUESTION_INDEX: bool = Field(
         default=True, description="Enable chunk question indexing for recall"
     )
+
+    # ── Scaffolding detection ────────────────────────────────────────────────
+    # Controls how assistant scaffolding messages (greetings, check-ins,
+    # clarification questions) are stripped before question generation.
+    #
+    # SCAFFOLDING_MODE options:
+    #   "manual"  — heuristic prefix/empathy lists. Zero LLM cost. Safe default.
+    #   "llm"     — single batched Groq call per session. Production grade.
+    #               Handles any phrasing, any language. ~$0.0001/session.
+    #   "both"    — manual first, then LLM validates. Most accurate.
+    #
+    # ENABLE_MANUAL_SCAFFOLDING only applies when mode is "manual" or "both".
+    # Set to False to fully disable manual heuristics (e.g. during LLM-only testing).
+    SCAFFOLDING_MODE: str = Field(
+        default="manual",
+        description="Scaffolding detection mode: manual | llm | both",
+    )
+    ENABLE_MANUAL_SCAFFOLDING: bool = Field(
+        default=True,
+        description="Enable manual heuristic scaffolding detection. Set False to disable prefix/empathy lists.",
+    )
     ENABLE_CHUNK_QUESTION_SEMANTIC_MATCHING: bool = Field(
         default=True, description="Enable semantic matching over chunk questions"
     )
@@ -207,7 +228,7 @@ class Settings(BaseSettings):
         default=0.7, description="Minimum similarity for chunk question matches"
     )
     CHUNK_QUESTION_COUNT: int = Field(
-        default=3, description="Number of questions to generate per transcript chunk"
+        default=2, description="Number of questions to generate per transcript chunk"
     )
     CHUNK_MAX_MESSAGES: int = Field(
         default=6, description="Max messages per transcript chunk for question generation"

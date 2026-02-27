@@ -1,20 +1,15 @@
 version: '3.8'
 
 services:
-  agent:
+  api:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: woka-bot-agent
-    # Use host network mode so container can access localhost services (LiveKit)
+    container_name: woka-bot-api
     network_mode: host
-    # Mount backend code as volume for development (changes picked up without rebuild)
     volumes:
-      - ./backend:/app/backend:ro  # Read-only mount (use :rw if you need to write)
+      - ./backend:/app/backend:ro
     environment:
-      # LiveKit - use localhost since we're on host network
-      # LIVEKIT_URL: for agent to connect locally
-      # LIVEKIT_PUBLIC_URL: for frontend to connect (use localhost for local dev)
       - LIVEKIT_URL=${LIVEKIT_URL_LOCAL:-ws://127.0.0.1:7880}
       - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL_LOCAL:-ws://localhost:7880}
       - LIVEKIT_API_KEY=${LIVEKIT_API_KEY_LOCAL:-devkey}
@@ -30,8 +25,7 @@ services:
       - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
       - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
       - LANGFUSE_HOST=${LANGFUSE_HOST:-https://cloud.langfuse.com}
-      # App config
-      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
       - DEBUG=${DEBUG:-false}
       - API_HOST=0.0.0.0
       - API_PORT=8000
@@ -42,21 +36,62 @@ services:
       # Bot config
       - BOT_NAME=${BOT_NAME:-Woka}
       - VAD_THRESHOLD=${VAD_THRESHOLD:-0.5}
-      - NUM_IDLE_PROCESSES=${NUM_IDLE_PROCESSES:-0}
       # Optional: Deepgram if used
       - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
       - DEEPGRAM_TTS_VOICE=${DEEPGRAM_TTS_VOICE:-aura-2-helena-en}
     env_file:
       - .env
     restart: unless-stopped
-    # Keep local behavior consistent regardless of production Dockerfile CMD.
-    command: ["bash", "-lc", "cd /app/backend && uvicorn app.main:app --host 0.0.0.0 --port 8000 & python -m bot.main dev"]
+    # Runs ONLY the FastAPI server (no bot worker here)
+    command: ["bash", "-lc", "cd /app/backend && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/docs", "||", "exit", "1"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    container_name: woka-bot-agent
+    network_mode: host
+    volumes:
+      - ./backend:/app/backend:ro
+    environment:
+      - LIVEKIT_URL=${LIVEKIT_URL_LOCAL:-ws://127.0.0.1:7880}
+      - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL_LOCAL:-ws://localhost:7880}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY_LOCAL:-devkey}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET_LOCAL:-secret}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - SUPABASE_ENABLED=${SUPABASE_ENABLED:-true}
+      - ENABLE_LANGFUSE=${ENABLE_LANGFUSE:-false}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY}
+      - LANGFUSE_HOST=${LANGFUSE_HOST:-https://cloud.langfuse.com}
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - DEBUG=${DEBUG:-false}
+      - BOT_NAME=${BOT_NAME:-Woka}
+      - VAD_THRESHOLD=${VAD_THRESHOLD:-0.5}
+      - NUM_IDLE_PROCESSES=${NUM_IDLE_PROCESSES:-1}
+      - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY:-}
+      - DEEPGRAM_TTS_VOICE=${DEEPGRAM_TTS_VOICE:-aura-2-helena-en}
+    env_file:
+      - .env
+    depends_on:
+      - api
+    restart: unless-stopped
+    # Runs ONLY the bot worker (no FastAPI here)
+    # command is inherited from Dockerfile.agent
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'bot.main' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
   frontend:
     build:
@@ -72,8 +107,9 @@ services:
     # Port mapping optional - tunnel can reach via Docker network
     # Changed to 15173 to avoid conflict with local frontend on 5173
     ports:
-      - "15173:80"  # Access locally at http://localhost:15173
+      - "15173:80"
     depends_on:
+      - api
       - agent
     restart: unless-stopped
     healthcheck:
@@ -87,4 +123,3 @@ services:
 networks:
   default:
     name: woka-bot-network
-

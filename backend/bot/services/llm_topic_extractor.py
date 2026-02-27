@@ -203,7 +203,7 @@ Return only a JSON array, e.g. ["topic1", "topic2"]:"""
                     "messages": [
                         {
                             "role": "system",
-                            "content": "You are a topic extraction assistant. Extract wellness-related topics from user messages. Return ONLY a JSON array of topic strings. Do not include any explanation or other text."
+                            "content": "You are a topic extraction assistant. Extract wellness-related topics from user messages. Always return topics in English regardless of the language of the input. Return ONLY a JSON array of topic strings. Do not include any explanation or other text."
                         },
                         {"role": "user", "content": prompt},
                     ],
@@ -346,7 +346,7 @@ Return ONLY a JSON array of 3-5 consolidated topics, e.g. ["topic1", "topic2"]:"
                     "messages": [
                         {
                             "role": "system",
-                            "content": "You are a topic consolidation assistant. Consolidate related wellness topics into high-level categories. Return ONLY a JSON array of 3-5 topic strings. Do not include any explanation."
+                            "content": "You are a topic consolidation assistant. Consolidate related wellness topics into high-level categories. Always return topics in English regardless of the input language. Return ONLY a JSON array of 3-5 topic strings. Do not include any explanation."
                         },
                         {"role": "user", "content": prompt},
                     ],

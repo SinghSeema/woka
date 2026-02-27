@@ -14,12 +14,11 @@ except ImportError:
     HAS_NUMPY = False
     np = None
 
-backend_dir = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(backend_dir))
 
 from app.core.config import settings
 from app.core.logging import get_logger
 from bot.services.topic_extractor import extract_topics_from_query
+from bot.services.vector_utils import cosine_similarity as _cosine_similarity
 
 logger = get_logger(__name__)
 
@@ -40,6 +39,17 @@ class PastReferenceIntent:
     confidence: float = 0.0  # 0.0 to 1.0
 
 
+# Trivial messages that never reference past conversations — skip all detection
+SKIP_INTENT_WORDS = {
+    "yes", "no", "okay", "ok", "sure", "yep", "nope", "yeah", "nah",
+    "thanks", "thank you", "thank you!", "thanks!", "cheers",
+    "got it", "got it!", "sounds good", "sounds good!",
+    "alright", "alright!", "cool", "cool!", "great", "great!",
+    "please", "please!", "go ahead", "continue", "keep going",
+    "hmm", "uh", "um", "ah", "oh",
+}
+
+
 async def detect_past_reference_intent(user_message: str) -> PastReferenceIntent:
     """Detect if user message references past conversations.
     
@@ -53,6 +63,11 @@ async def detect_past_reference_intent(user_message: str) -> PastReferenceIntent
         PastReferenceIntent object with detection results
     """
     if not user_message or not user_message.strip():
+        return PastReferenceIntent(has_intent=False)
+    
+    # Trivial message fast-path: skip all detection (saves regex + embedding cost)
+    if user_message.lower().strip() in SKIP_INTENT_WORDS:
+        logger.debug(f"Skipping intent detection for trivial message: '{user_message}'")
         return PastReferenceIntent(has_intent=False)
     
     # Fast path: Regex for high-confidence patterns (<1ms for 95% of queries)
@@ -245,43 +260,6 @@ async def _detect_with_embeddings(query: str) -> Optional[PastReferenceIntent]:
         logger.error(f"Error in embedding-based intent detection: {e}", exc_info=True)
         return None
 
-
-def _cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
-    """Calculate cosine similarity between two vectors.
-    
-    Args:
-        vec1: First vector
-        vec2: Second vector
-        
-    Returns:
-        Cosine similarity score (0.0 to 1.0)
-    """
-    try:
-        # Use NumPy if available (faster)
-        if HAS_NUMPY and np:
-            v1 = np.array(vec1)
-            v2 = np.array(vec2)
-            dot_product = np.dot(v1, v2)
-            norm1 = np.linalg.norm(v1)
-            norm2 = np.linalg.norm(v2)
-            if norm1 == 0 or norm2 == 0:
-                return 0.0
-            return float(dot_product / (norm1 * norm2))
-    except Exception:
-        pass
-    
-    # Fallback: Manual calculation
-    if len(vec1) != len(vec2):
-        return 0.0
-    
-    dot_product = sum(a * b for a, b in zip(vec1, vec2))
-    norm1 = sum(a * a for a in vec1) ** 0.5
-    norm2 = sum(b * b for b in vec2) ** 0.5
-    
-    if norm1 == 0 or norm2 == 0:
-        return 0.0
-    
-    return dot_product / (norm1 * norm2)
 
 
 async def _get_past_reference_pattern_embedding() -> Optional[List[float]]:

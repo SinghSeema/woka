@@ -4,20 +4,28 @@ import sys
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 
-backend_dir = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(backend_dir))
 
 from app.core.config import settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-# Token estimation: ~4 characters per token for English text
+# Token estimation — uses tiktoken when available, falls back to char ratio
 CHARS_PER_TOKEN = 4
+
+try:
+    import tiktoken
+    _tokenizer = tiktoken.get_encoding("cl100k_base")  # Compatible with most modern LLMs
+    _HAS_TIKTOKEN = True
+except Exception:
+    _tokenizer = None
+    _HAS_TIKTOKEN = False
 
 
 def estimate_tokens(text: str) -> int:
     """Estimate token count from text.
+    
+    Uses tiktoken for accuracy when available, falls back to char/4 ratio.
     
     Args:
         text: Text to estimate tokens for.
@@ -25,6 +33,13 @@ def estimate_tokens(text: str) -> int:
     Returns:
         Estimated token count.
     """
+    if not text:
+        return 0
+    if _HAS_TIKTOKEN and _tokenizer:
+        try:
+            return len(_tokenizer.encode(text))
+        except Exception:
+            pass
     return len(text) // CHARS_PER_TOKEN
 
 
@@ -114,7 +129,29 @@ def validate_context_size(
     Returns:
         Tuple of (is_valid, warning_message). warning_message is None if valid.
     """
-    # ... (existing logic) ...
+    total_tokens = estimate_tokens(system_prompt)
+    past_tokens = estimate_tokens(past_context) if past_context else 0
+
+    warning_threshold = int(model_context_window * settings.CONTEXT_WARNING_THRESHOLD)
+    error_threshold = model_context_window  # hard limit
+
+    if total_tokens >= error_threshold:
+        return False, (
+            f"System prompt too large: {total_tokens} tokens "
+            f"exceeds model context window of {error_threshold} tokens."
+        )
+
+    if total_tokens >= warning_threshold:
+        return True, (
+            f"System prompt approaching context limit: {total_tokens}/{warning_threshold} tokens "
+            f"({100 * total_tokens // model_context_window}% of context window used)."
+        )
+
+    if past_tokens > settings.MAX_PAST_CONTEXT_SIZE // CHARS_PER_TOKEN:
+        return True, (
+            f"Past context is large: {past_tokens} tokens — consider reducing MAX_PAST_SESSIONS."
+        )
+
     return True, None
 
 
@@ -195,12 +232,12 @@ def build_past_context(
     past_context += f"You have access to summaries from {len(truncated_sessions)} recent sessions with {user_name}. "
     past_context += "Use this information to answer their specific questions about past conversations.\n\n"
     past_context += "**IMPORTANT - Focus on User's Query:**\n"
-    past_context += "- When {user_name} asks a question, focus your answer specifically on what they asked about\n"
+    past_context += f"- When {user_name} asks a question, focus your answer specifically on what they asked about\n"
     past_context += "- Do not provide generic information or topics they didn't ask about\n"
     past_context += "- Reference past sessions only when directly relevant to their current question\n"
     past_context += "- Be precise and relevant - avoid broad, generic responses\n\n"
     past_context += "**Your capabilities with past sessions:**\n"
-    past_context += "1. **Answer Specific Questions**: When {user_name} asks about past sessions, reference the relevant information from summaries below\n"
+    past_context += f"1. **Answer Specific Questions**: When {user_name} asks about past sessions, reference the relevant information from summaries below\n"
     past_context += "2. **Be Precise**: Only mention topics, goals, or information that directly relates to their question\n"
     past_context += "3. **Provide Continuity**: Reference past conversations naturally when relevant to current topics\n"
     past_context += "4. **Track Progress**: Acknowledge achievements or progress when specifically asked about it\n\n"

@@ -189,7 +189,10 @@ async def setup_event_handlers(
                 # Optional: index chunk questions for semantic recall
                 if settings.ENABLE_CHUNK_QUESTION_INDEX:
                     try:
-                        rows = await build_chunk_question_rows(transcript, user_name, room_name)
+                        rows = await build_chunk_question_rows(
+                                transcript, user_name, room_name,
+                                session_topics=topics,  # propagate session-level topics to all chunks
+                            )
                         if rows:
                             inserted = await save_chunk_question_rows(rows)
                             logger.info(f"✅ Indexed {inserted} chunk-question rows for {room_name}")

@@ -6,6 +6,7 @@ This runs on the critical path right before the LLM. It MUST:
 - Re-use the same retrieval semantics as the dynamic context handler in events.py.
 """
 
+import hashlib
 from datetime import datetime
 from typing import Optional, Any, List, Dict
 
@@ -122,7 +123,7 @@ class PastContextProcessor(FrameProcessor):
                 "🔍 [PAST CONTEXT] frame=%s | instance=%s | msg_hash=%s | user='%s...'",
                 frame_type,
                 self._instance_id,
-                hash(user_message),
+                hashlib.md5(user_message.encode()).hexdigest(),
                 user_message[:80],
             )
 
@@ -145,7 +146,7 @@ class PastContextProcessor(FrameProcessor):
         """Detect past-reference intent, fetch context, and inject into system prompt."""
 
         # Prevent loops for the same exact message
-        msg_hash = hash(user_message)
+        msg_hash = hashlib.md5(user_message.encode()).hexdigest()
         if msg_hash in self._processed_queries:
             return False
 

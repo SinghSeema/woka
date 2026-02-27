@@ -4,8 +4,6 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-backend_dir = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(backend_dir))
 
 from app.core.config import settings
 from app.core.logging import get_logger
@@ -28,6 +26,27 @@ def set_embedding_cache(cache):
     global _embedding_cache
     _embedding_cache = cache
     logger.debug("Embedding cache configured")
+
+
+def set_embedding_model_from_proc(proc) -> bool:
+    """Use the embedding model pre-loaded during prewarm().
+
+    This avoids the cold-start delay on the first user query.
+
+    Args:
+        proc: JobProcess instance with userdata from prewarm()
+
+    Returns:
+        True if model was found and set, False otherwise
+    """
+    global _embedding_model
+    model = getattr(proc, "userdata", {}).get("embedding_model")
+    if model is not None:
+        _embedding_model = model
+        logger.info("✅ Embedding model loaded from prewarm userdata (no cold start)")
+        return True
+    logger.debug("No pre-warmed embedding model found in proc.userdata")
+    return False
 
 
 async def generate_embedding(text: str, use_cache: bool = True) -> Optional[List[float]]:
@@ -196,7 +215,24 @@ async def _generate_local_embedding(text: str) -> Optional[List[float]]:
             
             try:
                 _embedding_model = await asyncio.to_thread(load_model)
-                logger.debug(f"Local embedding model '{model_name}' loaded")
+                # Log actual embedding dimension immediately so mismatches are caught early
+                try:
+                    import asyncio as _asyncio
+                    test_emb = await _asyncio.to_thread(
+                        _embedding_model.encode, "test", convert_to_numpy=True
+                    )
+                    actual_dim = len(test_emb.tolist())
+                    expected_dim = getattr(settings, "EMBEDDING_DIMENSION", 384)
+                    if actual_dim == expected_dim:
+                        logger.info(f"✅ Embedding model '{model_name}' loaded — dim={actual_dim}")
+                    else:
+                        logger.error(
+                            f"❌ Embedding model '{model_name}' loaded but dim={actual_dim} "
+                            f"!= EMBEDDING_DIMENSION={expected_dim}. "
+                            f"Fix: set EMBEDDING_DIMENSION={actual_dim} in your .env"
+                        )
+                except Exception:
+                    logger.debug(f"Local embedding model '{model_name}' loaded")
             except Exception as load_error:
                 logger.error(f"❌ Failed to load embedding model: {load_error}")
                 return None
@@ -214,7 +250,19 @@ async def _generate_local_embedding(text: str) -> Optional[List[float]]:
         embedding = await asyncio.to_thread(
             _embedding_model.encode, text, convert_to_numpy=True
         )
-        return embedding.tolist()
+        result = embedding.tolist()
+
+        # Warn if dimension doesn't match configured schema expectation
+        actual_dim = len(result)
+        expected_dim = getattr(settings, "EMBEDDING_DIMENSION", 384)
+        if actual_dim != expected_dim:
+            logger.error(
+                f"❌ Embedding dimension mismatch: model produced {actual_dim}D "
+                f"but EMBEDDING_DIMENSION={expected_dim}. "
+                f"Update EMBEDDING_DIMENSION in config or switch LOCAL_EMBEDDING_MODEL "
+                f"to match your Supabase vector({expected_dim}) column."
+            )
+        return result
         
     except ImportError:
         logger.error("❌ sentence-transformers not installed.")
