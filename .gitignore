@@ -53,3 +53,6 @@ livekit.yaml
 *.so
 *.dylib
 *.dll
+*.zip
+woka-bot/
+password/
