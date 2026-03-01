@@ -61,8 +61,27 @@ SUPABASE_ENABLED=true
 SUPABASE_URL=...
 SUPABASE_KEY=...
 ```
+### 3. Start LiveKit Server
 
-### 3) Start services (3 terminals)
+```bash
+# Using Docker
+docker run -d \
+  --name livekit \
+  -p 7880:7880 \
+  -p 7881:7881 \
+  -p 7882:7882/udp \
+  -e LIVEKIT_KEYS="devkey: secret" \
+  livekit/livekit-server:latest
+```
+```bash
+#try this if server is not reachable
+    sudo docker run --rm \
+    --network host \
+    livekit/livekit-server \
+    --dev
+```bash
+
+### 4) Start services (3 terminals)
 
 ```bash
 # Terminal 1: backend API
