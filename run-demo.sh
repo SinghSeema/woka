@@ -45,7 +45,7 @@ export LIVEKIT_URL="ws://127.0.0.1:7880"
 export LIVEKIT_PUBLIC_URL="ws://127.0.0.1:7880"
 export LIVEKIT_API_KEY="devkey"
 export LIVEKIT_API_SECRET="secret"
-# frontend/.env.local already overrides VITE_API_BASE_URL=http://localhost:8000
+export VITE_API_BASE_URL="http://localhost:8000"
 
 # ── Step 1: Start LiveKit ──────────────────────────────────────────────────────
 echo -e "${BLUE}[1/4] Starting LiveKit server (Docker)...${NC}"
@@ -105,6 +105,7 @@ export LIVEKIT_URL="ws://127.0.0.1:7880"
 export LIVEKIT_PUBLIC_URL="ws://127.0.0.1:7880"
 export LIVEKIT_API_KEY="devkey"
 export LIVEKIT_API_SECRET="secret"
+export VITE_API_BASE_URL="http://localhost:8000"
 
 PYTHON="$SCRIPT_DIR/.pipebot/bin/python3"
 
