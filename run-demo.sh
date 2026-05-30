@@ -106,30 +106,31 @@ export LIVEKIT_PUBLIC_URL="ws://127.0.0.1:7880"
 export LIVEKIT_API_KEY="devkey"
 export LIVEKIT_API_SECRET="secret"
 
+PYTHON="$SCRIPT_DIR/.pipebot/bin/python3"
+UVICORN="$SCRIPT_DIR/.pipebot/bin/uvicorn"
+
 # ── Step 2: Backend API ────────────────────────────────────────────────────────
 echo -e "\n${BLUE}[2/4] Starting Backend API on http://localhost:8000 ...${NC}"
-cd backend
-source ../.pipebot/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload > ../logs/backend.log 2>&1 &
+cd "$SCRIPT_DIR/backend"
+"$UVICORN" app.main:app --host 0.0.0.0 --port 8000 --reload > "$SCRIPT_DIR/logs/backend.log" 2>&1 &
 BACKEND_PID=$!
-cd ..
+cd "$SCRIPT_DIR"
 sleep 3
 
 if kill -0 $BACKEND_PID 2>/dev/null; then
   echo -e "${GREEN}  Backend running (PID $BACKEND_PID)${NC}"
 else
   echo -e "${RED}  Backend failed. Check logs/backend.log${NC}"
-  cat logs/backend.log | tail -15
+  tail -15 logs/backend.log
   exit 1
 fi
 
 # ── Step 3: Bot agent worker ───────────────────────────────────────────────────
 echo -e "\n${BLUE}[3/4] Starting Bot agent worker...${NC}"
-cd backend
-source ../.pipebot/bin/activate
-python -m bot.main dev > ../logs/bot.log 2>&1 &
+cd "$SCRIPT_DIR/backend"
+"$PYTHON" -m bot.main dev > "$SCRIPT_DIR/logs/bot.log" 2>&1 &
 BOT_PID=$!
-cd ..
+cd "$SCRIPT_DIR"
 sleep 3
 
 if kill -0 $BOT_PID 2>/dev/null; then
