@@ -107,12 +107,11 @@ export LIVEKIT_API_KEY="devkey"
 export LIVEKIT_API_SECRET="secret"
 
 PYTHON="$SCRIPT_DIR/.pipebot/bin/python3"
-UVICORN="$SCRIPT_DIR/.pipebot/bin/uvicorn"
 
 # ── Step 2: Backend API ────────────────────────────────────────────────────────
 echo -e "\n${BLUE}[2/4] Starting Backend API on http://localhost:8000 ...${NC}"
 cd "$SCRIPT_DIR/backend"
-"$UVICORN" app.main:app --host 0.0.0.0 --port 8000 --reload > "$SCRIPT_DIR/logs/backend.log" 2>&1 &
+"$PYTHON" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload > "$SCRIPT_DIR/logs/backend.log" 2>&1 &
 BACKEND_PID=$!
 cd "$SCRIPT_DIR"
 sleep 3
