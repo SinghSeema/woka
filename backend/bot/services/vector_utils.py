@@ -55,3 +55,7 @@ def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
     except Exception:
         return 0.0
 
+
+
+
+

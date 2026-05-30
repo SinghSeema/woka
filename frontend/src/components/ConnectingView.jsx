@@ -23,8 +23,8 @@ function ConnectingContent({ onReady, onError }) {
   const [checkCount, setCheckCount] = useState(0);
   const hasBeenConnectedRef = useRef(false);
   const errorSentRef = useRef(false);
-  // Bot cold-start + model/service warmup can exceed 20s in local Docker.
-  const BOT_JOIN_MAX_CHECKS = 45; // ~45s max wait after connected
+  // Cloud Run agent may cold-start when min-instances=0.
+  const BOT_JOIN_MAX_CHECKS = 120; // ~120s max wait after connected
 
   // Track elapsed time
   useEffect(() => {
@@ -51,7 +51,7 @@ function ConnectingContent({ onReady, onError }) {
         }, 1000); // 1 second after bot detected
         return () => clearTimeout(timer);
       } else {
-        // Keep checking for bot (up to 5 seconds)
+        // Keep checking for bot while worker cold-starts
         if (checkCount < BOT_JOIN_MAX_CHECKS) {
           const timer = setTimeout(() => {
             setCheckCount((prev) => prev + 1);

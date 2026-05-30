@@ -8,17 +8,16 @@ import { handleApiError } from "../utils/errorHandler";
 
 /**
  * Landing page component.
- * @param {Object} props - Component props
- * @param {Function} props.onConnect - Callback when user connects
+ * @param {Object} props.onConnect - Callback(userName, languageCode) when user connects
  */
 export function LandingPage({ onConnect }) {
-  const [userName, setUserName] = useState("");
+  const [userName, setUserName]         = useState("");
   const [isConnecting, setIsConnecting] = useState(false);
-  const [error, setError] = useState(null);
+  const [error, setError]               = useState(null);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
+
     if (!userName.trim()) {
       setError("Please enter your name");
       return;
@@ -28,7 +27,7 @@ export function LandingPage({ onConnect }) {
     setError(null);
 
     try {
-      await onConnect(userName.trim());
+      await onConnect(userName.trim(), "en");
     } catch (err) {
       setError(handleApiError(err));
     } finally {
@@ -101,4 +100,3 @@ export function LandingPage({ onConnect }) {
     </div>
   );
 }
-

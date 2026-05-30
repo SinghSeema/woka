@@ -328,6 +328,7 @@ async def save_session_summary(
     duration_seconds: float,
     message_count: int,
     topics: List[str] = None,
+    metadata: Dict[str, Any] = None,
 ) -> bool:
     """Save session summary to Supabase.
 
@@ -426,6 +427,10 @@ async def save_session_summary(
             # Store empty array instead of None
             data["topics"] = []
         
+        # Add structured metadata if provided
+        if metadata:
+            data["metadata"] = metadata
+
         # Add embedding if available (do not log full embedding contents)
         if embedding:
             data["embedding"] = embedding
@@ -476,6 +481,172 @@ async def save_session_summary(
             f"❌ Error saving session summary to Supabase for {user_name} (room: {room_name}): {e}",
             exc_info=True
         )
+        return False
+
+
+async def update_session_checkpoint(
+    room_name: str,
+    user_name: str,
+    summary: str,
+    duration_seconds: float,
+    message_count: int,
+) -> bool:
+    """Update an existing session row with a mid-call checkpoint summary.
+
+    Lightweight — no embedding generation. Used every 5 minutes during a call
+    so that a crash does not lose the entire session.
+
+    Args:
+        room_name: Room name (unique key for the row)
+        user_name: User's display name
+        summary: Running summary text at this point in the call
+        duration_seconds: Current session duration
+        message_count: Current message count
+
+    Returns:
+        True if updated successfully, False otherwise
+    """
+    if not settings.SUPABASE_ENABLED:
+        return False
+
+    client = get_supabase_client()
+    if not client:
+        return False
+
+    try:
+        try:
+            normalized_name = _assert_user_name(user_name)
+        except ValueError as e:
+            logger.error(f"❌ SECURITY: {e}")
+            return False
+
+        if not summary or len(summary.strip()) < 10:
+            return False
+
+        result = (
+            client.table("sessions")
+            .update({
+                "summary": summary.strip(),
+                "duration_seconds": int(duration_seconds),
+                "message_count": message_count,
+            })
+            .eq("room_name", room_name)
+            .eq("user_name", normalized_name)
+            .execute()
+        )
+
+        if result.data:
+            logger.info(
+                f"📌 [CHECKPOINT] Updated | User: {user_name} | Room: {room_name} | "
+                f"Duration: {int(duration_seconds)}s | Messages: {message_count}"
+            )
+            return True
+
+        logger.warning(f"📌 [CHECKPOINT] Update returned no data for room {room_name}")
+        return False
+
+    except Exception as e:
+        logger.error(f"❌ Error updating session checkpoint: {e}", exc_info=True)
+        return False
+
+
+async def update_session_final(
+    room_name: str,
+    user_name: str,
+    summary: str,
+    duration_seconds: float,
+    message_count: int,
+    topics: List[str] = None,
+    metadata: Dict[str, Any] = None,
+) -> bool:
+    """Finalize an existing session row at call end.
+
+    Regenerates the embedding and writes the full end-of-call summary + metadata.
+    Used when a checkpoint row was already created mid-call.
+
+    Args:
+        room_name: Room name (unique key for the row)
+        user_name: User's display name
+        summary: Final prose summary (kept for semantic search)
+        duration_seconds: Total session duration
+        message_count: Total message count
+        topics: Topics extracted from the session
+        metadata: Structured fields dict (goal, progress, commitments, unresolved, constraints)
+
+    Returns:
+        True if updated successfully, False otherwise
+    """
+    if not settings.SUPABASE_ENABLED:
+        return False
+
+    client = get_supabase_client()
+    if not client:
+        return False
+
+    try:
+        try:
+            normalized_name = _assert_user_name(user_name)
+        except ValueError as e:
+            logger.error(f"❌ SECURITY: {e}")
+            return False
+
+        if not summary or len(summary.strip()) < 10:
+            logger.warning(f"❌ Summary too short, not finalizing (length: {len(summary) if summary else 0})")
+            return False
+
+        if topics is None:
+            topics = []
+
+        # Generate fresh embedding for final summary
+        embedding = None
+        if settings.ENABLE_SEMANTIC_SEARCH and settings.ENABLE_SESSION_EMBEDDINGS:
+            try:
+                embedding = await generate_embedding(summary.strip())
+                if embedding and len(embedding) != settings.EMBEDDING_DIMENSION:
+                    logger.error(
+                        f"❌ Embedding dimension mismatch: got {len(embedding)}, "
+                        f"expected {settings.EMBEDDING_DIMENSION}. Saving without embedding."
+                    )
+                    embedding = None
+            except Exception as e:
+                logger.error(f"❌ Error generating embedding for final save: {e}", exc_info=True)
+
+        data = {
+            "summary": summary.strip(),
+            "duration_seconds": int(duration_seconds),
+            "message_count": message_count,
+            "topics": topics,
+        }
+        if metadata:
+            data["metadata"] = metadata
+        if embedding:
+            data["embedding"] = embedding
+
+        result = (
+            client.table("sessions")
+            .update(data)
+            .eq("room_name", room_name)
+            .eq("user_name", normalized_name)
+            .execute()
+        )
+
+        if result.data:
+            logger.info(
+                f"✅ [FINAL SAVE] Updated | User: {user_name} | Room: {room_name} | "
+                f"Topics: {len(topics)} | Duration: {int(duration_seconds)}s | "
+                f"Embedding: {'yes' if embedding else 'no'}"
+            )
+            # Cache embedding
+            from bot.services.embedding_service import _embedding_cache
+            if _embedding_cache and embedding:
+                _embedding_cache.set_embedding(summary.strip(), embedding)
+            return True
+
+        logger.error(f"❌ [FINAL SAVE] Update returned no data for room {room_name}")
+        return False
+
+    except Exception as e:
+        logger.error(f"❌ Error finalizing session: {e}", exc_info=True)
         return False
 
 

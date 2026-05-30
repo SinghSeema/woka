@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     # LiveKit
     LIVEKIT_API_KEY: str = Field(..., description="LiveKit API key")
     LIVEKIT_API_SECRET: str = Field(..., description="LiveKit API secret")
-    LIVEKIT_URL: str = Field(default="", description="LiveKit WebSocket URL — must be set via env var in production")
+    LIVEKIT_URL: str = Field(default="ws://127.0.0.1:7880", description="LiveKit WebSocket URL (for agent connection)")
     LIVEKIT_PUBLIC_URL: Optional[str] = Field(
         default=None, 
         description="LiveKit public WebSocket URL (for frontend, defaults to LIVEKIT_URL if not set)"
@@ -71,8 +71,23 @@ class Settings(BaseSettings):
     DEEPGRAM_API_KEY: str = Field(..., description="Deepgram API key for STT and TTS")
     DEEPGRAM_TTS_VOICE: str = Field(
         default="aura-2-helena-en",
-        description="Deepgram TTS voice (Aura model)"
+        description="Deepgram TTS voice (Aura model) — English only"
     )
+    DEEPGRAM_STT_MODEL: str = Field(
+        default="nova-2",
+        description="Deepgram STT model. nova-2 supports English and most Indian languages."
+    )
+
+    # ── Phase 2: Multilingual ─────────────────────────────────────────────────
+    SESSION_LANGUAGE: str = Field(
+        default="en",
+        description=(
+            "Default session language (BCP-47 code, e.g. 'hi', 'ta', 'en'). "
+            "Overridden per-session by preferred_language in participant metadata. "
+            "STT transcribes in this language; TTS always responds in English."
+        ),
+    )
+    # ─────────────────────────────────────────────────────────────────────────
 
     # LLM Configuration
     LLM_MODEL: str = Field(default="llama-3.3-70b-versatile", description="Groq LLM model name")
@@ -84,7 +99,20 @@ class Settings(BaseSettings):
     # Bot Configuration
     BOT_NAME: str = Field(default="Woka", description="Bot display name")
     VAD_THRESHOLD: float = Field(default=0.5, description="Voice Activity Detection threshold")
-    NUM_IDLE_PROCESSES: int = Field(default=0, description="Pre-warmed bot processes. Set to 1 once memory usage is confirmed stable (idle ~150MB with VAD only). 0 = safe default.")
+    # Silero VAD params — tune these to reduce false triggers from background noise
+    VAD_CONFIDENCE: float = Field(default=0.88, description="Silero VAD minimum speech confidence (0-1). Higher = less sensitive.")
+    VAD_START_SECS: float = Field(default=0.6, description="Seconds of sustained speech required before triggering interruption. Higher = ignores short words like 'ok' and background bursts.")
+    VAD_STOP_SECS: float = Field(default=0.8, description="Seconds of silence before confirming speech has stopped.")
+    VAD_MIN_WORDS_INTERRUPT: int = Field(default=2, description="Minimum words in user utterance before it interrupts the bot and triggers a new LLM turn. Filters single-word backchannels like 'ok', 'yeah'.")
+    NUM_IDLE_PROCESSES: int = Field(default=0, description="Number of pre-warmed bot processes")
+    AGENT_WAKE_URL: Optional[str] = Field(
+        default=None,
+        description="Optional agent HTTP URL to ping before issuing user token (used to wake Cloud Run from scale-to-zero)",
+    )
+    AGENT_WAKE_TIMEOUT_SECONDS: int = Field(
+        default=20,
+        description="Timeout for each agent wake HTTP ping",
+    )
 
     # Session History (Supabase)
     SUPABASE_URL: Optional[str] = Field(default=None, description="Supabase project URL")
@@ -197,27 +225,6 @@ class Settings(BaseSettings):
     ENABLE_CHUNK_QUESTION_INDEX: bool = Field(
         default=True, description="Enable chunk question indexing for recall"
     )
-
-    # ── Scaffolding detection ────────────────────────────────────────────────
-    # Controls how assistant scaffolding messages (greetings, check-ins,
-    # clarification questions) are stripped before question generation.
-    #
-    # SCAFFOLDING_MODE options:
-    #   "manual"  — heuristic prefix/empathy lists. Zero LLM cost. Safe default.
-    #   "llm"     — single batched Groq call per session. Production grade.
-    #               Handles any phrasing, any language. ~$0.0001/session.
-    #   "both"    — manual first, then LLM validates. Most accurate.
-    #
-    # ENABLE_MANUAL_SCAFFOLDING only applies when mode is "manual" or "both".
-    # Set to False to fully disable manual heuristics (e.g. during LLM-only testing).
-    SCAFFOLDING_MODE: str = Field(
-        default="manual",
-        description="Scaffolding detection mode: manual | llm | both",
-    )
-    ENABLE_MANUAL_SCAFFOLDING: bool = Field(
-        default=True,
-        description="Enable manual heuristic scaffolding detection. Set False to disable prefix/empathy lists.",
-    )
     ENABLE_CHUNK_QUESTION_SEMANTIC_MATCHING: bool = Field(
         default=True, description="Enable semantic matching over chunk questions"
     )
@@ -228,7 +235,7 @@ class Settings(BaseSettings):
         default=0.7, description="Minimum similarity for chunk question matches"
     )
     CHUNK_QUESTION_COUNT: int = Field(
-        default=2, description="Number of questions to generate per transcript chunk"
+        default=3, description="Number of questions to generate per transcript chunk"
     )
     CHUNK_MAX_MESSAGES: int = Field(
         default=6, description="Max messages per transcript chunk for question generation"
@@ -320,4 +327,3 @@ class Settings(BaseSettings):
 
 # Global settings instance
 settings = Settings()
-

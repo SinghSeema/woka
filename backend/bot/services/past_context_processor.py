@@ -37,6 +37,7 @@ from bot.services.database_service import (
 from bot.services.context_injector import inject_past_context, inject_chunk_context
 from bot.services.filler_generator import generate_filler
 from bot.services.context_cache import ContextCache, generate_cache_key
+from bot.services.circuit_breaker import CircuitBreaker
 
 logger = get_logger(__name__)
 
@@ -58,6 +59,7 @@ class PastContextProcessor(FrameProcessor):
         self._shadow_memory = shadow_memory
         self._processed_queries = set()
         self._instance_id = hex(id(self))
+        self._breaker = CircuitBreaker(name=f"supabase-{user_name[:8]}")
         
         logger.debug(
             "PastContextProcessor initialized: user=%s, room=%s, instance=%s, "
@@ -195,12 +197,18 @@ class PastContextProcessor(FrameProcessor):
                 query_start = datetime.now()
 
                 # Choose retrieval strategy based on intent type.
+                # Every DB call goes through the circuit breaker:
+                # - Timeout budget: 0.5s per call
+                # - After 3 failures: circuit opens for 60s, returns [] immediately
                 if intent.intent_type == "date" and intent.date_range:
                     if settings.ENABLE_SESSION_FALLBACK:
-                        sessions = await get_sessions_by_date_range(
-                            self._user_name,
-                            intent.date_range["start"],
-                            intent.date_range["end"],
+                        sessions = await self._breaker.call(
+                            get_sessions_by_date_range(
+                                self._user_name,
+                                intent.date_range["start"],
+                                intent.date_range["end"],
+                            ),
+                            fallback=[],
                         )
                 elif intent.intent_type == "topic" and intent.topics:
                     logger.info(
@@ -215,12 +223,15 @@ class PastContextProcessor(FrameProcessor):
                     ):
                         original_query = intent.query_text.strip() if intent.query_text else " ".join(intent.topics)
                         semantic_query = expand_query_for_search(original_query, intent)
-                        chunk_matches = await get_chunk_questions_by_semantic_search(
-                            self._user_name,
-                            semantic_query,
-                            limit=getattr(settings, "CHUNK_QUESTION_MAX_RESULTS", 5),
-                            threshold=getattr(settings, "CHUNK_QUESTION_SEMANTIC_THRESHOLD", 0.7),
-                            topics=intent.topics if settings.ENABLE_CHUNK_QUESTION_TOPIC_MATCHING else None,
+                        chunk_matches = await self._breaker.call(
+                            get_chunk_questions_by_semantic_search(
+                                self._user_name,
+                                semantic_query,
+                                limit=getattr(settings, "CHUNK_QUESTION_MAX_RESULTS", 5),
+                                threshold=getattr(settings, "CHUNK_QUESTION_SEMANTIC_THRESHOLD", 0.7),
+                                topics=intent.topics if settings.ENABLE_CHUNK_QUESTION_TOPIC_MATCHING else None,
+                            ),
+                            fallback=[],
                         )
                         logger.info(
                             "🔎 [PAST CONTEXT] chunk-semantic | query='%s...' | results=%d",
@@ -234,10 +245,13 @@ class PastContextProcessor(FrameProcessor):
                         and settings.ENABLE_CHUNK_QUESTION_INDEX
                         and settings.ENABLE_CHUNK_QUESTION_TOPIC_MATCHING
                     ):
-                        chunk_matches = await get_chunk_questions_by_topic(
-                            self._user_name,
-                            intent.topics,
-                            limit=getattr(settings, "CHUNK_QUESTION_MAX_RESULTS", 5),
+                        chunk_matches = await self._breaker.call(
+                            get_chunk_questions_by_topic(
+                                self._user_name,
+                                intent.topics,
+                                limit=getattr(settings, "CHUNK_QUESTION_MAX_RESULTS", 5),
+                            ),
+                            fallback=[],
                         )
                         logger.info(
                             "🔎 [PAST CONTEXT] chunk-topic | topics=%s | results=%d",
@@ -257,34 +271,27 @@ class PastContextProcessor(FrameProcessor):
                         and settings.ENABLE_SESSION_EMBEDDINGS
                         and intent.topics
                     ):
-                        # Use full original query text for semantic search (better embeddings)
-                        # Topics are used for pre-filtering, not for query construction
                         filtered_topics = [t for t in intent.topics if t and len(t.strip()) > 2]
-                        
-                        # Use original query text for semantic search (not just topic words)
-                        # This produces better embeddings for semantic similarity
                         original_query = intent.query_text.strip() if intent.query_text else " ".join(filtered_topics)
-                        
-                        # Expand query for better embedding quality
                         semantic_query = expand_query_for_search(original_query, intent)
-                        
-                        # Lower threshold for topic queries since they may have shorter queries
-                        # But use full query text which should give better scores
                         semantic_limit = getattr(settings, "MAX_SEMANTIC_SEARCH_RESULTS", 5)
-                        topic_threshold = 0.5  # Lower threshold for topic-based searches
-                        
+                        topic_threshold = 0.5
+
                         logger.debug(
                             f"Topic query: expanded '{original_query[:50]}...' → '{semantic_query[:100]}...' "
                             f"with topics {filtered_topics} for pre-filtering"
                         )
-                        
-                        sessions = await get_sessions_by_semantic_search(
-                            self._user_name,
-                            semantic_query,  # Use expanded query for better embeddings
-                            limit=semantic_limit,
-                            threshold=topic_threshold,
-                            topics=filtered_topics,  # Pass topics for pre-filtering
-                            shadow_memory=self._shadow_memory,
+
+                        sessions = await self._breaker.call(
+                            get_sessions_by_semantic_search(
+                                self._user_name,
+                                semantic_query,
+                                limit=semantic_limit,
+                                threshold=topic_threshold,
+                                topics=filtered_topics,
+                                shadow_memory=self._shadow_memory,
+                            ),
+                            fallback=[],
                         )
                     if (
                         settings.ENABLE_SESSION_FALLBACK
@@ -292,10 +299,13 @@ class PastContextProcessor(FrameProcessor):
                         and intent.topics
                         and settings.ENABLE_TOPIC_MATCHING
                     ):
-                        sessions = await get_sessions_by_topic(
-                            self._user_name,
-                            intent.topics,
-                            limit=settings.MAX_DYNAMIC_SESSIONS,
+                        sessions = await self._breaker.call(
+                            get_sessions_by_topic(
+                                self._user_name,
+                                intent.topics,
+                                limit=settings.MAX_DYNAMIC_SESSIONS,
+                            ),
+                            fallback=[],
                         )
                 elif intent.intent_type == "semantic" or (
                     intent.intent_type == "general" and intent.query_text
@@ -312,12 +322,15 @@ class PastContextProcessor(FrameProcessor):
                     ):
                         original_query = intent.query_text.strip()
                         semantic_query = expand_query_for_search(original_query, intent)
-                        chunk_matches = await get_chunk_questions_by_semantic_search(
-                            self._user_name,
-                            semantic_query,
-                            limit=getattr(settings, "CHUNK_QUESTION_MAX_RESULTS", 5),
-                            threshold=getattr(settings, "CHUNK_QUESTION_SEMANTIC_THRESHOLD", 0.7),
-                            topics=intent.topics if settings.ENABLE_CHUNK_QUESTION_TOPIC_MATCHING else None,
+                        chunk_matches = await self._breaker.call(
+                            get_chunk_questions_by_semantic_search(
+                                self._user_name,
+                                semantic_query,
+                                limit=getattr(settings, "CHUNK_QUESTION_MAX_RESULTS", 5),
+                                threshold=getattr(settings, "CHUNK_QUESTION_SEMANTIC_THRESHOLD", 0.7),
+                                topics=intent.topics if settings.ENABLE_CHUNK_QUESTION_TOPIC_MATCHING else None,
+                            ),
+                            fallback=[],
                         )
                         logger.info(
                             "🔎 [PAST CONTEXT] chunk-semantic | query='%s...' | results=%d",
@@ -338,24 +351,22 @@ class PastContextProcessor(FrameProcessor):
                         and settings.ENABLE_SESSION_EMBEDDINGS
                         and intent.query_text
                     ):
-                        # Expand query for better embedding quality
                         original_query = intent.query_text.strip()
                         semantic_query = expand_query_for_search(original_query, intent)
-                        
-                        # Use higher limit for semantic search (threshold filters quality)
                         semantic_limit = getattr(settings, "MAX_SEMANTIC_SEARCH_RESULTS", 5)
                         logger.debug(
                             f"General/semantic query: expanded '{original_query[:50]}...' → '{semantic_query[:100]}...'"
                         )
-                        sessions = await get_sessions_by_semantic_search(
-                            self._user_name,
-                            semantic_query,  # Use expanded query
-                            limit=semantic_limit,
-                            threshold=getattr(
-                                settings, "SEMANTIC_SEARCH_THRESHOLD", 0.5
+                        sessions = await self._breaker.call(
+                            get_sessions_by_semantic_search(
+                                self._user_name,
+                                semantic_query,
+                                limit=semantic_limit,
+                                threshold=getattr(settings, "SEMANTIC_SEARCH_THRESHOLD", 0.5),
+                                topics=intent.topics if intent.topics else None,
+                                shadow_memory=self._shadow_memory,
                             ),
-                            topics=intent.topics if intent.topics else None,  # Pass topics if available
-                            shadow_memory=self._shadow_memory,  # Pass for local search
+                            fallback=[],
                         )
 
                 # Fallback: if user explicitly asked for history and search found 0,
@@ -366,8 +377,9 @@ class PastContextProcessor(FrameProcessor):
                     and not chunk_matches
                     and intent.has_intent
                 ):
-                    sessions = await get_all_sessions(
-                        self._user_name, limit=settings.MAX_DYNAMIC_SESSIONS
+                    sessions = await self._breaker.call(
+                        get_all_sessions(self._user_name, limit=settings.MAX_DYNAMIC_SESSIONS),
+                        fallback=[],
                     )
 
                 query_duration = (datetime.now() - query_start).total_seconds() * 1000

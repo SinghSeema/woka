@@ -14,6 +14,7 @@ REPO="${REPO:-woka-repo}"
 BACKEND_SERVICE="${BACKEND_SERVICE:-woka-backend}"
 FRONTEND_SERVICE="${FRONTEND_SERVICE:-woka-frontend}"
 IMAGE_TAG="${IMAGE_TAG:-$(date +%Y%m%d-%H%M%S)}"
+LIVEKIT_CLOUD_URL="${LIVEKIT_CLOUD_URL:-wss://woka-qe4nlyjl.livekit.cloud}"
 
 if [[ -z "${PROJECT_ID}" ]]; then
   echo "PROJECT_ID is required"
@@ -98,7 +99,7 @@ gcloud run deploy "${BACKEND_SERVICE}" \
   --min-instances=0 \
   --max-instances=3 \
   --update-env-vars=ENVIRONMENT=production,DEBUG=false,API_PORT=8000 \
-  --update-env-vars=LIVEKIT_URL="$(grep -E '^LIVEKIT_URL=' .env | cut -d= -f2-)",LIVEKIT_PUBLIC_URL="$(grep -E '^LIVEKIT_PUBLIC_URL=' .env | cut -d= -f2-)" \
+  --update-env-vars=LIVEKIT_URL="${LIVEKIT_CLOUD_URL}",LIVEKIT_PUBLIC_URL="${LIVEKIT_CLOUD_URL}" \
   --update-secrets=LIVEKIT_API_KEY=LIVEKIT_API_KEY:latest,LIVEKIT_API_SECRET=LIVEKIT_API_SECRET:latest,GROQ_API_KEY=GROQ_API_KEY:latest,DEEPGRAM_API_KEY=DEEPGRAM_API_KEY:latest
 
 BACKEND_URL="$(gcloud run services describe "${BACKEND_SERVICE}" --region "${REGION}" --format='value(status.url)')"

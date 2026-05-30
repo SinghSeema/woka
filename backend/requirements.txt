@@ -5,7 +5,7 @@ pydantic-settings>=2.1.0
 python-dotenv>=1.0.0
 livekit>=0.11.0
 livekit-agents>=0.8.0
-pipecat-ai[silero]>=0.0.79
+pipecat-ai[silero]==0.0.100
 supabase>=2.0.0
 httpx>=0.25.0
 langfuse
@@ -15,8 +15,8 @@ opentelemetry-exporter-otlp
 # to avoid downloading CUDA libraries (~2GB+)
 sentence-transformers
 groq>=0.4.0
-# Pipecat 0.0.100 requires deepgram-sdk v3.x (v5.x has breaking API changes)
-deepgram-sdk>=3.2.0,<4.0.0
+# Pipecat 0.0.100 deepgram extra requires deepgram-sdk~=4.7.0.
+deepgram-sdk~=4.7.0
 
 
 tiktoken>=0.6.0  # Accurate token counting in context_manager

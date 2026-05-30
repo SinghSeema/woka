@@ -29,23 +29,36 @@ logger = get_logger(__name__)
 # Heavy imports will be done lazily in entrypoint() to speed up worker startup
 
 
+def _make_vad_analyzer():
+    """Create a SileroVADAnalyzer with noise-resistant settings from config."""
+    from pipecat.audio.vad.silero import SileroVADAnalyzer
+    from pipecat.audio.vad.vad_analyzer import VADParams
+    return SileroVADAnalyzer(
+        params=VADParams(
+            confidence=settings.VAD_CONFIDENCE,
+            start_secs=settings.VAD_START_SECS,
+            stop_secs=settings.VAD_STOP_SECS,
+        )
+    )
+
+
 def prewarm(proc: JobProcess):
     """Pre-warm bot processes with heavy models.
 
-    IMPORTANT: Only load VAD here.
-    The SentenceTransformer embedding model (~400MB) must NOT be loaded during
-    prewarm — it pushes the idle process over LiveKit's 500MB memory warning
-    threshold, causing it to be killed before initialization completes.
-    The embedding model loads lazily on first use inside the session.
+    NOTE: VAD model is pre-downloaded during Docker build, so we can load it
+    immediately during prewarm without network delay.
     """
-    # Load VAD model
     try:
-        from pipecat.audio.vad.silero import SileroVADAnalyzer
-        proc.userdata["vad"] = SileroVADAnalyzer()
-        logger.info("✅ Prewarm: VAD model loaded")
+        proc.userdata["vad"] = _make_vad_analyzer()
+        logger.info(
+            f"Bot engine warmed up (VAD model loaded | "
+            f"confidence={settings.VAD_CONFIDENCE} "
+            f"start_secs={settings.VAD_START_SECS} "
+            f"stop_secs={settings.VAD_STOP_SECS})"
+        )
     except Exception as e:
-        logger.error(f"Prewarm VAD failed: {e}", exc_info=True)
-        # Don't raise — entrypoint will create VAD on-demand if prewarm fails
+        logger.error(f"Pre-warm failed: {e}", exc_info=True)
+        # Don't raise - let entrypoint create VAD on-demand if prewarm fails
 
 
 async def entrypoint(ctx: JobContext):
@@ -55,7 +68,6 @@ async def entrypoint(ctx: JobContext):
     # Lazy import heavy dependencies to speed up worker startup
     from livekit import api
     from app.core.observability import init_tracing, init_langfuse
-    from pipecat.audio.vad.silero import SileroVADAnalyzer
     from pipecat.pipeline.pipeline import Pipeline
     from pipecat.pipeline.runner import PipelineRunner
     from pipecat.pipeline.task import PipelineTask, PipelineParams
@@ -85,7 +97,7 @@ async def entrypoint(ctx: JobContext):
         vad_analyzer = ctx.proc.userdata.get("vad")
         if not vad_analyzer:
             logger.warning("VAD not pre-warmed, creating new instance")
-            vad_analyzer = SileroVADAnalyzer()
+            vad_analyzer = _make_vad_analyzer()
 
         # Connect the worker to the room
         await ctx.connect(auto_subscribe=True)
@@ -94,29 +106,32 @@ async def entrypoint(ctx: JobContext):
         # OPTIMIZATION: Trigger non-blocking model pre-warm after joining
         if settings.ENABLE_SEMANTIC_SEARCH:
             from bot.services.embedding_service import generate_embedding
-            # Load embedding model in background AFTER joining the room so it
-            # does not block pipeline startup and doesn't run during idle prewarm.
-            def _on_warmup_done(task):
-                if task.exception():
-                    logger.error(f"Background embedding warm-up failed: {task.exception()}")
-            warmup_task = asyncio.create_task(generate_embedding("warmup", use_cache=False))
-            warmup_task.add_done_callback(_on_warmup_done)
-            logger.info("Background embedding warm-up started (model loads in background)")
+            # This triggers the model load in a background thread so it doesn't stall the pipeline
+            asyncio.create_task(generate_embedding("warmup", use_cache=False))
+            logger.info("Background embedding warm-up started")
 
-        # Get user metadata (Name, etc.) passed from server
+        # Get user metadata (name, preferred language) passed from frontend
         user_name = "Guest"
+        language_code = getattr(settings, "SESSION_LANGUAGE", "en") or "en"
+
         for participant in ctx.room.remote_participants.values():
             if participant.metadata:
                 try:
                     meta = json.loads(participant.metadata)
-                    raw_name = meta.get("user_name", "Guest")
-                    # Sanitize: cap length and strip whitespace to prevent DB issues
-                    user_name = str(raw_name)[:50].strip() or "Guest"
+                    user_name = meta.get("user_name", "Guest")
+                    # Phase 2: frontend passes preferred_language in room metadata
+                    # e.g. {"user_name": "Vivaan", "preferred_language": "hi"}
+                    if meta.get("preferred_language"):
+                        language_code = meta["preferred_language"]
                     break
                 except json.JSONDecodeError:
                     logger.warning(f"Failed to parse participant metadata: {participant.metadata}")
 
-        logger.info(f"User name: {user_name}")
+        from bot.services.language_config import get_display_name
+        logger.info(
+            f"User: {user_name} | "
+            f"Language: {get_display_name(language_code)} ({language_code})"
+        )
         logger.info(f"Room name: {ctx.room.name}")
 
         # Initialize transcript storage
@@ -131,6 +146,23 @@ async def entrypoint(ctx: JobContext):
         shadow_memory = memory_services.shadow_memory
         memory_manager = memory_services.memory_manager
         performance_monitor = memory_services.performance_monitor
+
+        # Fetch last session metadata for commitment follow-up in the opening greeting.
+        # Lightweight: fetches 1 row, no embedding generation. Falls back to None on error.
+        last_session_metadata = None
+        if settings.SUPABASE_ENABLED:
+            try:
+                from bot.services.database_service import get_past_sessions
+                past_sessions = await get_past_sessions(user_name, limit=1)
+                if past_sessions:
+                    last_session_metadata = past_sessions[0].get("metadata")
+                    if last_session_metadata:
+                        logger.info(
+                            f"📋 Last session metadata loaded for {user_name}: "
+                            f"fields={list(last_session_metadata.keys())}"
+                        )
+            except Exception as _meta_err:
+                logger.warning(f"⚠️  Could not load last session metadata: {_meta_err}")
 
         # OPTIMIZATION: Skip past context loading at startup for faster pipeline initialization
         # Past context will be loaded on-demand via dynamic context queries if needed
@@ -169,13 +201,11 @@ async def entrypoint(ctx: JobContext):
         services_start_time = datetime.now()
         logger.info("Initializing services in parallel...")
         try:
-            # Create services concurrently
-            # Note: these are lightweight constructors (no blocking I/O),
-            # so we call them directly without to_thread overhead
+            # Create services concurrently — language_code routes STT to correct Deepgram model
             stt, llm, tts = await asyncio.gather(
-                asyncio.to_thread(create_stt_service),   # may load model weights
-                asyncio.to_thread(create_llm_service),   # may init client
-                asyncio.to_thread(create_tts_service),   # may init client
+                asyncio.to_thread(create_stt_service, language_code),
+                asyncio.to_thread(create_llm_service),
+                asyncio.to_thread(create_tts_service),
                 return_exceptions=True
             )
             
@@ -199,7 +229,11 @@ async def entrypoint(ctx: JobContext):
         # OPTIMIZATION: Build system prompt WITHOUT past context for fast startup
         # Past context will be loaded on-demand via dynamic context queries if needed
         logger.debug("Building system prompt (past context skipped for fast startup)")
-        system_prompt = build_base_system_prompt(user_name)
+        system_prompt = build_base_system_prompt(
+            user_name,
+            language_code=language_code,
+            previous_session_metadata=last_session_metadata,
+        )
         messages = [{"role": "system", "content": system_prompt}]
         context = OpenAILLMContext(messages)
         context_aggregator = llm.create_context_aggregator(context)
@@ -216,6 +250,7 @@ async def entrypoint(ctx: JobContext):
         # They will only send to Langfuse/OTel if enabled in settings
         from bot.services.langfuse_metrics import LlmRequestStartProcessor, LangfuseMetrics
         from bot.services.past_context_processor import PastContextProcessor
+        from bot.services.backchannel_filter import BackchannelFilter
 
         langfuse_shared_state = {}
         llm_request_tracker = LlmRequestStartProcessor(shared_state=langfuse_shared_state)
@@ -244,6 +279,7 @@ async def entrypoint(ctx: JobContext):
         pipeline_components = [
             transport.input(),
             stt,
+            BackchannelFilter(),
             context_aggregator.user(),
             llm_request_tracker,
             past_context_handler,
@@ -256,7 +292,17 @@ async def entrypoint(ctx: JobContext):
         
         pipeline = Pipeline(pipeline_components)
 
-        task = PipelineTask(pipeline, params=PipelineParams(allow_interruptions=True))
+        # Require at least 2 words before treating user speech as an interruption.
+        # This filters single-word backchannels ("ok", "yeah", "mm-hmm") so they
+        # don't stop the bot mid-sentence or trigger a new LLM turn.
+        from pipecat.audio.interruptions.min_words_interruption_strategy import MinWordsInterruptionStrategy
+        task = PipelineTask(
+            pipeline,
+            params=PipelineParams(
+                allow_interruptions=True,
+                interruption_strategies=[MinWordsInterruptionStrategy(min_words=settings.VAD_MIN_WORDS_INTERRUPT)],
+            ),
+        )
 
         # Setup event handlers
         handlers_start_time = datetime.now()
@@ -277,15 +323,11 @@ async def entrypoint(ctx: JobContext):
                 logger.info("Pre-warming Shadow Memory in background")
                 # Run pre-warming as background task (don't await, non-blocking)
                 # Pass context so pre-warmed sessions can be injected into system prompt
-                shadow_task = asyncio.create_task(
+                asyncio.create_task(
                     shadow_memory.prewarm(
                         limit=settings.MAX_PAST_SESSIONS, inject_into_context=context
                     )
                 )
-                def _on_shadow_done(task):
-                    if task.exception():
-                        logger.error(f"Shadow Memory prewarm failed: {task.exception()}")
-                shadow_task.add_done_callback(_on_shadow_done)
                 logger.info("Shadow Memory pre-warming started (non-blocking)")
 
         # OPTIMIZATION: Past context loading is skipped at startup for faster initialization
@@ -333,13 +375,9 @@ if __name__ == "__main__":
                 entrypoint_fnc=entrypoint,
                 prewarm_fnc=prewarm,
                 num_idle_processes=settings.NUM_IDLE_PROCESSES,
-                initialize_process_timeout=180.0,  # 180s allows VAD + first embedding load
-                # Raise memory ceiling: SentenceTransformer alone is ~400MB;
-                # 0 = no limit (default LiveKit warning is 500MB which is too low)
-                max_retry=3,
+                initialize_process_timeout=300.0,  # Increase to 300s (5 min) to allow VAD model download during prewarm
             )
         )
     except Exception as e:
         logger.error(f"LiveKit worker process exited with error: {e}", exc_info=True)
         raise
-

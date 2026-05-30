@@ -68,21 +68,12 @@ async def _merge_summaries(
     new_conversation_text: str,
     user_name: str
 ) -> Optional[str]:
-    """Merge a new conversation segment into an existing summary.
-    
-    Args:
-        previous_summary: The existing running summary
-        new_conversation_text: The new conversation text to add
-        user_name: User's name
-        
-    Returns:
-        Merged summary text
-    """
+    """Merge a new conversation segment into an existing structured summary."""
     try:
         import httpx
-        
-        merge_prompt = f"""You are maintaining a 'Running Summary' of a wellness coaching journey for {user_name}.
-Update the existing summary by incorporating the new conversation segment below.
+
+        merge_prompt = f"""You are maintaining a structured coaching memory for {user_name}.
+Update each field below using the existing summary and the new conversation.
 
 EXISTING SUMMARY:
 {previous_summary}
@@ -90,16 +81,22 @@ EXISTING SUMMARY:
 NEW CONVERSATION SEGMENT:
 {new_conversation_text}
 
-STRICT REQUIREMENTS for the UPDATED SUMMARY:
-1. PRESERVE key progress, active goals, and established habits from the existing summary.
-2. INCORPORATE any new goals, action steps, or insights from the new segment.
-3. REMOVE redundant or outdated information to keep it concise.
-4. Keep the total length under 4-5 sentences.
+Output ONLY the updated summary using this exact structure (one line per field, write "none" if not applicable):
 
-Updated Running Summary:"""
+GOAL: [current focus with specific metric if mentioned, e.g. "walk 30 min 3x/week"]
+PROGRESS: [what has been done or current status]
+COMMITMENTS: [specific actions {user_name} agreed to do before next session]
+UNRESOLVED: [struggles or open questions that were not resolved]
+CONSTRAINTS: [dislikes, busy times, equipment limits, or other restrictions mentioned]
+
+Rules:
+- PRESERVE information from existing fields unless the new conversation explicitly changes it.
+- COMMITMENTS should be concrete actions, not vague intentions.
+- UNRESOLVED should list open challenges that still need follow-up.
+- Do NOT add explanations or extra text outside the five fields."""
 
         summary_model = getattr(settings, "SUMMARIZATION_MODEL", settings.LLM_MODEL)
-        
+
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(
                 "https://api.groq.com/openai/v1/chat/completions",
@@ -112,21 +109,21 @@ Updated Running Summary:"""
                     "messages": [
                         {
                             "role": "system",
-                            "content": "You are a wellness coaching memory assistant responsible for maintaining a concise running summary of a user's progress."
+                            "content": "You are a wellness coaching memory assistant. Output only the structured summary fields — no extra text."
                         },
                         {"role": "user", "content": merge_prompt},
                     ],
-                    "temperature": 0.2,
-                    "max_tokens": 250,
+                    "temperature": 0.1,
+                    "max_tokens": 300,
                 },
             )
             response.raise_for_status()
             result = response.json()
             return result["choices"][0]["message"]["content"].strip()
-            
+
     except Exception as e:
         logger.error(f"Error merging summaries: {e}", exc_info=True)
-        return previous_summary + "\n[Recent update failed, but continuity preserved]"
+        return previous_summary + "\nUNRESOLVED: [recent update failed, continuity preserved]"
 
 
 async def _generate_llm_summary(
@@ -134,41 +131,30 @@ async def _generate_llm_summary(
     user_name: str,
     message_count: int
 ) -> Optional[str]:
-    """Generate summary using LLM.
-    
-    Args:
-        conversation_text: Formatted conversation text
-        user_name: User's name
-        message_count: Number of messages being summarized
-        
-    Returns:
-        Summary text or None
-    """
+    """Generate a structured summary from raw conversation text."""
     try:
         import httpx
-        
-        # Truncate if too long (keep last 3000 chars for context to get better summaries)
+
+        # Keep last 3000 chars so the prompt stays within token budget
         if len(conversation_text) > 3000:
             conversation_text = conversation_text[-3000:]
-        
-        # Enhanced coaching-specific prompt for better continuity
-        summary_prompt = f"""Summarize this wellness coaching session segment with {user_name} ({message_count} messages).
-The goal is to maintain continuity in their coaching journey.
 
-STRICT REQUIREMENTS:
-1. Identify the CURRENT FOCUS or HABIT being discussed.
-2. Note any specific GOALS or ACTION STEPS agreed upon.
-3. Capture the USER'S EMOTIONAL STATE or ENERGY LEVEL if mentioned.
-4. Keep the summary under 3 sentences.
+        summary_prompt = f"""Summarize this wellness coaching conversation with {user_name} ({message_count} messages).
+Extract each field below. Write "none" if the conversation does not mention it.
 
-Conversation to summarize:
+Conversation:
 {conversation_text}
 
-Concise Coaching Summary:"""
+Output ONLY the five fields (no extra text):
 
-        # Use the specific summarization model to save TPD on the main model
+GOAL: [current focus with specific metric if mentioned, e.g. "walk 30 min 3x/week"]
+PROGRESS: [what has been done or current status]
+COMMITMENTS: [specific actions {user_name} agreed to do before next session]
+UNRESOLVED: [struggles or open questions that were not resolved]
+CONSTRAINTS: [dislikes, busy times, equipment limits, or other restrictions mentioned]"""
+
         summary_model = getattr(settings, "SUMMARIZATION_MODEL", settings.LLM_MODEL)
-        
+
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(
                 "https://api.groq.com/openai/v1/chat/completions",
@@ -181,29 +167,27 @@ Concise Coaching Summary:"""
                     "messages": [
                         {
                             "role": "system",
-                            "content": "You are a wellness coaching memory assistant. Your job is to extract key coaching state to ensure continuity across session segments."
+                            "content": "You are a wellness coaching memory assistant. Output only the structured summary fields — no extra text."
                         },
                         {"role": "user", "content": summary_prompt},
                     ],
-                    "temperature": 0.1,  # Lower temperature for more consistent, factual summaries
-                    "max_tokens": 150,
+                    "temperature": 0.1,
+                    "max_tokens": 250,
                 },
             )
             response.raise_for_status()
             result = response.json()
             summary = result["choices"][0]["message"]["content"].strip()
-            
-            # Log token usage if available (for monitoring)
+
             usage = result.get("usage", {})
             if usage:
-                input_tokens = usage.get("prompt_tokens", 0)
-                output_tokens = usage.get("completion_tokens", 0)
                 logger.debug(
-                    f"Memory compression tokens: input={input_tokens}, output={output_tokens}"
+                    f"Memory compression tokens: input={usage.get('prompt_tokens', 0)}, "
+                    f"output={usage.get('completion_tokens', 0)}"
                 )
-            
+
             return summary
-            
+
     except Exception as e:
         logger.error(f"Error generating LLM summary: {e}", exc_info=True)
         return _generate_basic_summary(conversation_text, message_count)
@@ -222,6 +206,38 @@ def _generate_basic_summary(conversation_text: str, message_count: int) -> str:
     # Extract first few words from conversation as basic summary
     preview = conversation_text[:200].replace("\n", " ")
     return f"Previous conversation segment ({message_count} messages): {preview}..."
+
+
+def _format_structured_summary(summary: str) -> str:
+    """Convert structured summary fields into natural coaching context prose.
+
+    Strips "none" values and presents the remaining fields in a way the LLM
+    can use naturally without seeing raw key/value syntax.
+    """
+    _FIELDS = ["GOAL", "PROGRESS", "COMMITMENTS", "UNRESOLVED", "CONSTRAINTS"]
+    _LABELS = {
+        "GOAL":        "Current goal",
+        "PROGRESS":    "Progress so far",
+        "COMMITMENTS": "What the user committed to do",
+        "UNRESOLVED":  "Open challenges / unresolved",
+        "CONSTRAINTS": "User constraints and preferences",
+    }
+
+    lines = []
+    for field in _FIELDS:
+        # Match "FIELD: value" (case-insensitive, tolerant of whitespace)
+        import re
+        match = re.search(rf"^{field}:\s*(.+)$", summary, re.IGNORECASE | re.MULTILINE)
+        if match:
+            value = match.group(1).strip()
+            if value.lower() not in ("none", "n/a", "-", ""):
+                lines.append(f"- **{_LABELS[field]}**: {value}")
+
+    if lines:
+        return "\n".join(lines)
+
+    # Fallback: return raw summary if it doesn't use the structured format
+    return summary
 
 
 def inject_summary_into_context(
@@ -256,8 +272,12 @@ def inject_summary_into_context(
                 summary_index = i
                 break
         
-        # Create summary message
-        summary_content = f"## RUNNING CONVERSATION SUMMARY\n{summary}\n\nThis is a compressed representation of the conversation history to maintain continuity while staying within token limits."
+        # Format structured summary fields into readable coaching context
+        summary_content = (
+            "## RUNNING CONVERSATION SUMMARY\n"
+            + _format_structured_summary(summary)
+            + "\n\nThis is a compressed representation of the conversation history to maintain continuity while staying within token limits."
+        )
         
         if summary_index >= 0:
             # Replace existing

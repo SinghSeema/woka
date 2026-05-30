@@ -1,5 +1,6 @@
 """Session summary generation service."""
 
+import re
 import sys
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
@@ -17,12 +18,54 @@ from bot.services.llm_topic_extractor import consolidate_topics
 
 logger = get_logger(__name__)
 
+_METADATA_FIELDS = ["GOAL", "PROGRESS", "COMMITMENTS", "UNRESOLVED", "CONSTRAINTS"]
+
+
+def _parse_dual_response(raw: str) -> Tuple[str, Dict[str, str]]:
+    """Split a dual-format LLM response into prose summary and metadata dict.
+
+    Expected format (LLM is instructed to use this):
+        PROSE_SUMMARY:
+        <paragraph>
+
+        STRUCTURED:
+        GOAL: <value>
+        PROGRESS: <value>
+        COMMITMENTS: <value>
+        UNRESOLVED: <value>
+        CONSTRAINTS: <value>
+
+    Returns (prose, metadata_dict). Falls back gracefully if format is missing.
+    """
+    prose = raw.strip()
+    metadata: Dict[str, str] = {}
+
+    if "STRUCTURED:" in raw:
+        parts = raw.split("STRUCTURED:", 1)
+        prose_block = parts[0]
+        structured_block = parts[1]
+
+        # Extract prose — remove "PROSE_SUMMARY:" header if present
+        prose = re.sub(r"(?i)^PROSE_SUMMARY:\s*", "", prose_block.strip()).strip()
+
+        # Extract each field from the structured block
+        for field in _METADATA_FIELDS:
+            match = re.search(
+                rf"^{field}:\s*(.+)$", structured_block, re.IGNORECASE | re.MULTILINE
+            )
+            if match:
+                value = match.group(1).strip()
+                if value.lower() not in ("none", "n/a", "-", ""):
+                    metadata[field.lower()] = value
+
+    return prose, metadata
+
 
 async def generate_session_summary(
     transcript: List[Dict[str, Any]], user_name: str, duration_seconds: float,
     performance_monitor=None, room_name: str = ""
-) -> Tuple[str, List[str]]:
-    """Generate LLM-based session summary and extract topics.
+) -> Tuple[str, List[str], Dict[str, str]]:
+    """Generate LLM-based session summary and extract topics + structured metadata.
 
     Args:
         transcript: List of message dictionaries with role and content
@@ -32,7 +75,8 @@ async def generate_session_summary(
         room_name: Optional room name for tracking
 
     Returns:
-        Tuple of (summary_text, topics_list) where topics_list is extracted from summary
+        Tuple of (summary_text, topics_list, metadata_dict)
+        metadata_dict keys: goal, progress, commitments, unresolved, constraints
     """
     try:
         # Filter out system messages and format transcript
@@ -44,13 +88,10 @@ async def generate_session_summary(
 
         if len(conversation) < 2:
             summary = _generate_basic_summary(user_name, duration_seconds)
-            # Extract topics from user messages only (not from summary)
-            # Use hybrid extraction (keyword + LLM fallback if enabled)
             user_messages = [msg.get("content", "") for msg in transcript if msg.get("role") == "user"]
             extracted_topics = await extract_topics_from_user_messages_hybrid(user_messages)
-            # Consolidate to 3-5 topics for cleaner storage
             topics = await consolidate_topics(extracted_topics, max_topics=5)
-            return summary, topics
+            return summary, topics, {}
 
         # Use more messages for better context (last 30 messages or all if less)
         conversation_text = "\n".join(conversation[-30:]) if len(conversation) > 30 else "\n".join(conversation)
@@ -59,24 +100,23 @@ async def generate_session_summary(
         minutes = int(duration_seconds / 60)
         seconds = int(duration_seconds % 60)
 
-        # Enhanced summary prompt for better context
-        summary_prompt = f"""Create a comprehensive summary of this wellness coaching session with {user_name} (duration: {minutes}m {seconds}s). 
+        # Dual-format prompt: prose summary for semantic search + structured fields for recall
+        summary_prompt = f"""You are summarizing a wellness coaching session with {user_name} (duration: {minutes}m {seconds}s).
 
-The summary will be used as context in future sessions to provide continuity and personalized coaching. Make it detailed enough to help the coach remember:
-- User's specific goals, concerns, and challenges mentioned
-- Topics discussed (sleep, nutrition, exercise, stress, habits, etc.)
-- Key advice, recommendations, or strategies provided
-- User's progress, achievements, or setbacks mentioned
-- Plans, commitments, or next steps discussed
-- User's preferences, lifestyle, or constraints mentioned
-- Any patterns or recurring themes
+Respond in this EXACT format — two sections separated by "STRUCTURED:":
 
-Format the summary as a concise but informative paragraph (4-6 sentences) that captures the essence of the conversation. Focus on actionable information that would be useful in future sessions.
+PROSE_SUMMARY:
+<4-6 sentence paragraph capturing: goals discussed, advice given, progress reported, plans or commitments made, user preferences or constraints, and recurring themes. Write in third person. This will be used for semantic search in future sessions.>
+
+STRUCTURED:
+GOAL: <current focus with specific metric if mentioned, e.g. "sleep by 10 PM daily"; write "none" if not mentioned>
+PROGRESS: <what {user_name} reported doing or achieving; write "none" if not mentioned>
+COMMITMENTS: <specific actions {user_name} agreed to do before next session; write "none" if not mentioned>
+UNRESOLVED: <struggles or open questions that were not resolved; write "none" if not mentioned>
+CONSTRAINTS: <dislikes, busy times, equipment limits, or lifestyle restrictions mentioned; write "none" if not mentioned>
 
 Conversation transcript:
-{conversation_text}
-
-Comprehensive summary:"""
+{conversation_text}"""
 
         # Use Groq LLM API directly for summarization
         try:
@@ -104,9 +144,11 @@ Comprehensive summary:"""
                 )
                 response.raise_for_status()
                 result = response.json()
-                summary = result["choices"][0]["message"]["content"].strip()
-                
-                # Extract token usage if available and track it
+                raw_output = result["choices"][0]["message"]["content"].strip()
+
+                # Parse dual-format response into prose + structured metadata
+                summary, metadata = _parse_dual_response(raw_output)
+
                 usage = result.get("usage", {})
                 if usage and performance_monitor and room_name:
                     performance_monitor.record_request(
@@ -118,25 +160,18 @@ Comprehensive summary:"""
                         output_tokens=usage.get("completion_tokens", 0),
                         success=True
                     )
-                
-                # Extract topics from USER MESSAGES ONLY (not from summary or assistant responses)
-                # Use hybrid extraction (keyword + LLM fallback if enabled)
+
                 user_messages = [msg.get("content", "") for msg in transcript if msg.get("role") == "user"]
-                extracted_topics = await extract_topics_from_user_messages_hybrid(user_messages)
-                # Ensure topics is always a list (never None)
-                if extracted_topics is None:
-                    extracted_topics = []
-                
-                # Consolidate topics to 3-5 high-level topics for cleaner storage
-                # This prevents verbose topic lists while maintaining semantic search capability
+                extracted_topics = await extract_topics_from_user_messages_hybrid(user_messages) or []
                 topics = await consolidate_topics(extracted_topics, max_topics=5)
-                
+
                 logger.info(
                     f"✅ [SESSION STORAGE] Summary: {len(summary)} chars | "
-                    f"Topics: {len(extracted_topics)} extracted → {len(topics)} consolidated: {topics}"
+                    f"Topics: {len(extracted_topics)} → {len(topics)}: {topics} | "
+                    f"Metadata fields: {list(metadata.keys())}"
                 )
-                
-                return summary, topics
+
+                return summary, topics, metadata
 
         except httpx.HTTPStatusError as e:
             logger.error(
@@ -145,20 +180,16 @@ Comprehensive summary:"""
             )
             summary = _generate_basic_summary(user_name, duration_seconds)
             user_messages = [msg.get("content", "") for msg in transcript if msg.get("role") == "user"]
-            extracted_topics = await extract_topics_from_user_messages_hybrid(user_messages)
-            if extracted_topics is None:
-                extracted_topics = []
+            extracted_topics = await extract_topics_from_user_messages_hybrid(user_messages) or []
             topics = await consolidate_topics(extracted_topics, max_topics=5)
-            return summary, topics
+            return summary, topics, {}
         except httpx.TimeoutException:
             logger.warning("⚠️  [SESSION SUMMARY] Request timeout, using basic summary")
             summary = _generate_basic_summary(user_name, duration_seconds)
             user_messages = [msg.get("content", "") for msg in transcript if msg.get("role") == "user"]
-            extracted_topics = await extract_topics_from_user_messages_hybrid(user_messages)
-            if extracted_topics is None:
-                extracted_topics = []
+            extracted_topics = await extract_topics_from_user_messages_hybrid(user_messages) or []
             topics = await consolidate_topics(extracted_topics, max_topics=5)
-            return summary, topics
+            return summary, topics, {}
         except Exception as e:
             logger.error(
                 f"❌ [SESSION SUMMARY] Error: {type(e).__name__}: {e}",
@@ -166,11 +197,9 @@ Comprehensive summary:"""
             )
             summary = _generate_basic_summary(user_name, duration_seconds)
             user_messages = [msg.get("content", "") for msg in transcript if msg.get("role") == "user"]
-            extracted_topics = await extract_topics_from_user_messages_hybrid(user_messages)
-            if extracted_topics is None:
-                extracted_topics = []
+            extracted_topics = await extract_topics_from_user_messages_hybrid(user_messages) or []
             topics = await consolidate_topics(extracted_topics, max_topics=5)
-            return summary, topics
+            return summary, topics, {}
 
     except Exception as e:
         logger.error(
@@ -179,11 +208,9 @@ Comprehensive summary:"""
         )
         summary = _generate_basic_summary(user_name, duration_seconds)
         user_messages = [msg.get("content", "") for msg in transcript if msg.get("role") == "user"]
-        extracted_topics = await extract_topics_from_user_messages_hybrid(user_messages)
-        if extracted_topics is None:
-            extracted_topics = []
+        extracted_topics = await extract_topics_from_user_messages_hybrid(user_messages) or []
         topics = await consolidate_topics(extracted_topics, max_topics=5)
-        return summary, topics
+        return summary, topics, {}
 
 
 def _generate_basic_summary(user_name: str, duration_seconds: float) -> str:

@@ -24,6 +24,7 @@ class ConversationMemory:
         self.summaries: List[Dict[str, Any]] = []  # Rolling summaries
         self.running_summary: Optional[str] = None  # Single accumulated summary
         self.last_check: Optional[datetime] = None
+        self.compression_depth: int = 0  # How many incremental merges have happened
         
     def should_summarize(
         self,
@@ -105,15 +106,30 @@ class ConversationMemory:
         
         return to_summarize, to_keep
     
-    def record_summarization(self, message_count: int) -> None:
+    def record_summarization(self, message_count: int, was_merge: bool = False) -> None:
         """Record that summarization was performed.
-        
+
         Args:
             message_count: Current message count when summary was created
+            was_merge: True if this was an incremental merge (depth increases),
+                       False if it was a full re-summary from raw transcript (depth resets)
         """
         self.last_summary_message_count = message_count
         self.last_check = datetime.now()
-        logger.debug(f"Recorded summarization at {message_count} messages")
+        if was_merge:
+            self.compression_depth += 1
+        else:
+            self.compression_depth = 0
+        logger.debug(
+            f"Recorded summarization at {message_count} messages "
+            f"(depth={self.compression_depth}, merge={was_merge})"
+        )
+
+    @property
+    def needs_full_resummary(self) -> bool:
+        """True when incremental merges have stacked up enough to risk drift."""
+        max_depth = getattr(settings, "MEMORY_MAX_COMPRESSION_DEPTH", 2)
+        return self.compression_depth >= max_depth
     
     def add_rolling_summary(self, summary: str, message_range: Tuple[int, int]) -> None:
         """Add a rolling summary to track.

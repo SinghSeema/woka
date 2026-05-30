@@ -5,13 +5,19 @@ import { handleApiError, logError } from "../utils/errorHandler";
 
 /**
  * Generate LiveKit access token.
- * @param {string} userName - User's display name
+ * @param {string} userName     - User's display name
+ * @param {string} languageCode - BCP-47 language code (e.g. "hi", "ta", "en")
  * @returns {Promise<Object>} Token response with room_name, token, and url
  */
-export async function getToken(userName) {
+export async function getToken(userName, languageCode = "en") {
   try {
+    const params = new URLSearchParams({
+      user: userName,
+      language: languageCode,
+    });
+
     const response = await fetch(
-      `${API_BASE_URL}${API_PREFIX}/auth/connect?user=${encodeURIComponent(userName)}`,
+      `${API_BASE_URL}${API_PREFIX}/auth/connect?${params.toString()}`,
       {
         method: "GET",
         headers: {
@@ -22,13 +28,14 @@ export async function getToken(userName) {
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
-      const error = new Error(errorData.error || `HTTP error! status: ${response.status}`);
+      const error = new Error(
+        errorData.error || `HTTP error! status: ${response.status}`
+      );
       error.response = { status: response.status, data: errorData };
       throw error;
     }
 
-    const data = await response.json();
-    return data;
+    return await response.json();
   } catch (error) {
     logError(error, "getToken");
     throw error;
@@ -55,4 +62,3 @@ export async function healthCheck() {
     throw error;
   }
 }
-

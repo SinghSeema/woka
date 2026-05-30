@@ -13,6 +13,7 @@ from app.core.logging import get_logger
 from bot.services.summary_service import generate_session_summary
 from bot.services.database_service import (
     save_session_summary, check_session_exists,
+    update_session_checkpoint, update_session_final,
     get_sessions_by_semantic_search, get_sessions_by_date_range,
     get_sessions_by_topic, get_all_sessions,
     save_chunk_question_rows
@@ -50,21 +51,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-async def setup_event_handlers(
-    transport,
-    task: "PipelineTask",
-    transcript_storage: "TranscriptStorage",
-    user_name: str,
-    room_name: str,
-    context: "OpenAILLMContext",
-    context_cache: ContextCache = None,
-    memory_manager: ConversationMemory = None,
-    performance_monitor = None,
-    shadow_memory: ShadowMemory = None,
-) -> None:
-    """Setup event handlers for transport."""
-    from pipecat.frames.frames import LLMMessagesFrame
-    
 # NOTE: Past reference dynamic context fetching is now handled exclusively
 # by `PastContextProcessor` in the pipeline. The event handlers here focus on:
 # - TTFT / full turn duration metrics
@@ -86,22 +72,27 @@ async def setup_event_handlers(
     """Setup event handlers for transport."""
     from pipecat.frames.frames import LLMMessagesFrame
     
-    # Initialize memory manager if not provided
-    
+    # Mutable state shared across closures (list trick for nonlocal mutation)
+    _checkpoint_row_created = [False]  # True once an initial row exists in DB
+    _checkpoint_task = [None]          # asyncio.Task handle so we can cancel it
+
     async def save_session_if_needed():
-        """Save session summary if conditions are met."""
+        """Save session summary if conditions are met.
+
+        If a checkpoint row already exists (written mid-call every 5 min),
+        does a final UPDATE with full summary + embedding instead of INSERT.
+        """
         try:
             logger.info(f"Attempting to save session summary for {user_name} (room: {room_name})")
-            
-            # Check if Supabase is enabled
+
             if not settings.SUPABASE_ENABLED:
                 logger.info("Supabase is disabled, skipping session save")
                 return
-            
+
             duration = transcript_storage.get_duration_seconds()
             logger.info(f"Session duration: {duration:.1f} seconds")
-            
-            # Get message count from context first (more reliable)
+
+            # Collect messages from context (more reliable than transcript_storage)
             message_count = 0
             transcript = []
             try:
@@ -111,15 +102,11 @@ async def setup_event_handlers(
                         role = msg.get("role", "")
                         content = msg.get("content", "")
                         if role in ["user", "assistant"] and content and content.strip():
-                            transcript.append({
-                                "role": role,
-                                "content": content.strip()
-                            })
+                            transcript.append({"role": role, "content": content.strip()})
                     message_count = len(transcript)
                     logger.info(f"Found {message_count} messages in context")
                 else:
                     logger.warning("No messages found in context")
-                    # Fallback to transcript storage
                     message_count = transcript_storage.get_message_count()
                     transcript = transcript_storage.get_transcript()
                     logger.info(f"Using transcript storage: {message_count} messages")
@@ -128,71 +115,74 @@ async def setup_event_handlers(
                 message_count = transcript_storage.get_message_count()
                 transcript = transcript_storage.get_transcript()
 
-            # Minimum requirements: 30 seconds and 2 messages
             if duration < 30:
                 logger.info(f"Session too short to save: {duration:.1f}s (minimum 30s required)")
                 return
-                
+
             if message_count < 2:
                 logger.info(f"Not enough messages to save: {message_count} (minimum 2 required)")
                 return
 
-            # Check if session already exists
-            if await check_session_exists(room_name):
-                logger.info(f"Session {room_name} already saved, skipping")
-                return
-
-            # Validate transcript
             if not transcript or len(transcript) < 2:
-                logger.warning(
-                    f"Insufficient transcript for summary: {len(transcript)} messages. "
-                    f"Minimum 2 required."
-                )
+                logger.warning(f"Insufficient transcript for summary: {len(transcript)} messages.")
                 return
 
             logger.info(f"Generating summary for {len(transcript)} messages, duration: {duration:.1f}s")
-            
-            # Generate summary and extract topics (pass performance monitor to track tokens)
-            summary, topics = await generate_session_summary(
+
+            summary, topics, metadata = await generate_session_summary(
                 transcript, user_name, duration,
                 performance_monitor=performance_monitor,
                 room_name=room_name
             )
-            
+
             if not summary or len(summary.strip()) < 10:
                 logger.error("Generated summary is too short or empty, not saving")
                 return
-            
+
             logger.info(f"Generated summary ({len(summary)} chars): {summary[:100]}...")
             if topics:
                 logger.info(f"Extracted {len(topics)} topics: {topics}")
             else:
                 logger.warning(f"No topics extracted from session (topics={topics})")
+            if metadata:
+                logger.info(f"Structured metadata: {list(metadata.keys())}")
 
-            # Save to database with topics
-            success = await save_session_summary(
-                user_name=user_name,
-                room_name=room_name,
-                summary=summary,
-                topics=topics,
-                duration_seconds=duration,
-                message_count=message_count,
-            )
-            
+            # Choose INSERT vs UPDATE based on whether a checkpoint row already exists
+            row_exists = _checkpoint_row_created[0] or await check_session_exists(room_name)
+
+            if row_exists:
+                success = await update_session_final(
+                    user_name=user_name,
+                    room_name=room_name,
+                    summary=summary,
+                    topics=topics,
+                    metadata=metadata,
+                    duration_seconds=duration,
+                    message_count=message_count,
+                )
+            else:
+                success = await save_session_summary(
+                    user_name=user_name,
+                    room_name=room_name,
+                    summary=summary,
+                    topics=topics,
+                    metadata=metadata,
+                    duration_seconds=duration,
+                    message_count=message_count,
+                )
+
             if success:
-                logger.info(f"✅ Successfully saved session summary for {user_name} (room: {room_name})")
-                # Invalidate cache for this user since new session was saved
+                logger.info(f"✅ Successfully saved session for {user_name} (room: {room_name})")
                 if context_cache:
                     context_cache.invalidate_user(user_name)
                     logger.debug(f"Invalidated cache for {user_name}")
 
-                # Optional: index chunk questions for semantic recall
                 if settings.ENABLE_CHUNK_QUESTION_INDEX:
                     try:
                         rows = await build_chunk_question_rows(
-                                transcript, user_name, room_name,
-                                session_topics=topics,  # propagate session-level topics to all chunks
-                            )
+                            transcript, user_name, room_name,
+                            session_topics=topics,
+                        )
                         if rows:
                             inserted = await save_chunk_question_rows(rows)
                             logger.info(f"✅ Indexed {inserted} chunk-question rows for {room_name}")
@@ -201,10 +191,85 @@ async def setup_event_handlers(
                     except Exception as e:
                         logger.error(f"Chunk question indexing failed: {e}", exc_info=True)
             else:
-                logger.error(f"❌ Failed to save session summary for {user_name} (room: {room_name})")
+                logger.error(f"❌ Failed to save session for {user_name} (room: {room_name})")
 
         except Exception as e:
             logger.error(f"Error saving session summary: {e}", exc_info=True)
+
+    async def _run_checkpoint_loop():
+        """Write the running summary to DB every 5 minutes.
+
+        First iteration creates the row (INSERT). Subsequent iterations update it.
+        This ensures a crash at minute 28 only loses the last 5 minutes.
+        """
+        # Wait 60s before the first checkpoint so the session has some content
+        await asyncio.sleep(60)
+        while True:
+            try:
+                duration = transcript_storage.get_duration_seconds()
+                messages = context.get_messages()
+                msg_count = len([
+                    m for m in messages
+                    if m.get("role") in ["user", "assistant"]
+                ])
+
+                if duration >= 30 and msg_count >= 2 and settings.SUPABASE_ENABLED:
+                    # Prefer the in-memory running summary (already maintained, no LLM cost)
+                    summary_text = (
+                        memory_manager.running_summary
+                        if memory_manager and memory_manager.running_summary
+                        else None
+                    )
+
+                    # Fall back to generating a quick summary from recent messages
+                    if not summary_text:
+                        recent = [
+                            m for m in messages
+                            if m.get("role") in ["user", "assistant"]
+                        ][-10:]
+                        if len(recent) >= 2:
+                            summary_text = await summarize_conversation_segment(recent, user_name)
+
+                    if summary_text:
+                        if not _checkpoint_row_created[0]:
+                            # First checkpoint — INSERT the initial row (no embedding yet)
+                            success = await save_session_summary(
+                                user_name=user_name,
+                                room_name=room_name,
+                                summary=summary_text,
+                                duration_seconds=duration,
+                                message_count=msg_count,
+                                topics=[],
+                            )
+                            if success:
+                                _checkpoint_row_created[0] = True
+                                logger.info(
+                                    f"📌 [CHECKPOINT] Initial row created at {duration:.0f}s "
+                                    f"| {msg_count} messages | {room_name}"
+                                )
+                        else:
+                            # Subsequent checkpoints — UPDATE (no embedding, fast)
+                            await update_session_checkpoint(
+                                room_name=room_name,
+                                user_name=user_name,
+                                summary=summary_text,
+                                duration_seconds=duration,
+                                message_count=msg_count,
+                            )
+            except asyncio.CancelledError:
+                logger.debug("Checkpoint loop cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Checkpoint loop error: {e}", exc_info=True)
+
+            await asyncio.sleep(300)  # 5 minutes between checkpoints
+
+    def _cancel_checkpoint_task():
+        """Cancel the background checkpoint loop if running."""
+        task = _checkpoint_task[0]
+        if task and not task.done():
+            task.cancel()
+            logger.debug("Checkpoint loop task cancelled")
 
     monitoring_started = False
 
@@ -380,39 +445,63 @@ async def setup_event_handlers(
                 
                 # Get messages to compress
                 to_summarize, to_keep = memory_manager.get_messages_to_summarize(messages)
-                
+
                 if not to_summarize:
                     return
-                
-                # Summarize segment and merge into running summary
-                new_summary = await summarize_conversation_segment(
-                    to_summarize, 
-                    user_name,
-                    previous_summary=memory_manager.running_summary
+
+                # After 2 incremental merges, re-summarize from the full raw transcript
+                # to prevent "summary of a summary" hallucination drift.
+                force_full_resummary = (
+                    memory_manager.needs_full_resummary
+                    and memory_manager.running_summary is not None
                 )
-                
+
+                if force_full_resummary:
+                    logger.info(
+                        f"♻️  Compression depth {memory_manager.compression_depth} reached limit — "
+                        f"running full re-summary from raw transcript to reset drift"
+                    )
+                    full_transcript = transcript_storage.get_transcript()
+                    raw_messages = [
+                        m for m in full_transcript
+                        if m.get("role") in ["user", "assistant"]
+                    ]
+                    new_summary = await summarize_conversation_segment(
+                        raw_messages,
+                        user_name,
+                        previous_summary=None,  # no merge — start clean
+                    )
+                    was_merge = False
+                else:
+                    new_summary = await summarize_conversation_segment(
+                        to_summarize,
+                        user_name,
+                        previous_summary=memory_manager.running_summary,
+                    )
+                    was_merge = memory_manager.running_summary is not None
+
                 if new_summary:
-                    # Update memory manager state
                     memory_manager.running_summary = new_summary
-                    
-                    # Calculate message range
+
                     message_range = (
                         len(messages) - len(to_summarize) - len(to_keep),
                         len(messages) - len(to_keep)
                     )
-                    
-                    # Inject into context (handles replacement if already exists)
+
                     success = inject_summary_into_context(context, new_summary, message_range)
-                    
+
                     if success:
-                        # Remove full-text messages that were summarized
                         removed_count = remove_old_messages(context, to_summarize)
-                        memory_manager.record_summarization(len(messages) - removed_count)
+                        memory_manager.record_summarization(
+                            len(messages) - removed_count,
+                            was_merge=was_merge,
+                        )
                         memory_manager.add_rolling_summary(new_summary, message_range)
-                        
+
                         logger.info(
-                            f"✅ Session continuity preserved via updated running summary "
-                            f"({len(new_summary)} chars)"
+                            f"✅ Session continuity preserved via "
+                            f"{'full re-summary' if not was_merge else 'merged summary'} "
+                            f"({len(new_summary)} chars, depth={memory_manager.compression_depth})"
                         )
                     else:
                         logger.warning("Failed to inject summary into context")
@@ -434,6 +523,10 @@ async def setup_event_handlers(
         # Always attach observer so TTFT is tracked even when dynamic context is off
         attach_message_observer()
         logger.debug("✅ Event-based message monitoring enabled (triggers on context change)")
+
+        # Start 5-minute checkpoint loop to guard against mid-call crashes
+        _checkpoint_task[0] = asyncio.create_task(_run_checkpoint_loop())
+        logger.debug("✅ Session checkpoint loop started (every 5 min)")
         
         # Trigger the bot to greet the user immediately
         try:
@@ -461,25 +554,24 @@ async def setup_event_handlers(
         logger.info("👋 User left the room - attempting to save session summary")
         logger.info(f"   User: {user_name}")
         logger.info(f"   Room: {room_name}")
-        
-        # Log performance and cost summary
+
+        _cancel_checkpoint_task()
+
         if performance_monitor:
             metrics = performance_monitor.get_session_metrics(user_name, room_name)
             if metrics and getattr(settings, 'TRACK_COSTS', True):
                 cost_breakdown = estimate_session_cost(
                     total_input_tokens=metrics.get('total_tokens_input', 0),
                     total_output_tokens=metrics.get('total_tokens_output', 0),
-                    embedding_tokens=0  # Could track this separately if needed
+                    embedding_tokens=0
                 )
                 log_cost_summary(user_name, room_name, cost_breakdown)
-        
-        # Save session summary before cleanup
+
         await save_session_if_needed()
-        
-        # Cleanup performance monitoring
+
         if performance_monitor:
             performance_monitor.cleanup_session(user_name, room_name)
-        
+
         logger.info("Cleaning up task...")
         try:
             await task.cancel()
@@ -499,32 +591,30 @@ async def setup_event_handlers(
         logger.info(f"   User: {user_name}")
         logger.info(f"   Room: {room_name}")
 
-        # Record session end in Langfuse (if configured)
         record_session_event(
             event_name="session_ended",
             user_name=user_name,
             room_name=room_name,
             properties={"state": state},
         )
-        
-        # Log performance and cost summary
+
+        _cancel_checkpoint_task()
+
         if performance_monitor:
             metrics = performance_monitor.get_session_metrics(user_name, room_name)
             if metrics and getattr(settings, 'TRACK_COSTS', True):
                 cost_breakdown = estimate_session_cost(
                     total_input_tokens=metrics.get('total_tokens_input', 0),
                     total_output_tokens=metrics.get('total_tokens_output', 0),
-                    embedding_tokens=0  # Could track this separately if needed
+                    embedding_tokens=0
                 )
                 log_cost_summary(user_name, room_name, cost_breakdown)
-        
-        # Save session summary before cleanup
+
         await save_session_if_needed()
-        
-        # Cleanup performance monitoring
+
         if performance_monitor:
             performance_monitor.cleanup_session(user_name, room_name)
-        
+
         logger.info("Cleaning up task...")
         try:
             await task.cancel()

@@ -12,26 +12,24 @@ import { handleApiError, logError } from "../utils/errorHandler";
  * Manages state flow: LandingPage -> ConnectingView -> RoomView
  */
 export function VoiceAssistant() {
-  const [roomData, setRoomData] = useState(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [roomData, setRoomData]       = useState(null);
+  const [isLoading, setIsLoading]     = useState(true);
   const [isConnecting, setIsConnecting] = useState(false);
-  const [isReady, setIsReady] = useState(false);
+  const [isReady, setIsReady]         = useState(false);
 
   useEffect(() => {
-    // Health check on mount
     healthCheck()
-      .then(() => {
-        setIsLoading(false);
-      })
+      .then(() => setIsLoading(false))
       .catch((error) => {
         logError(error, "VoiceAssistant");
         setIsLoading(false);
       });
   }, []);
 
-  const handleConnect = async (userName) => {
+  // Phase 2: handleConnect now receives languageCode from LandingPage
+  const handleConnect = async (userName, languageCode = "en") => {
     try {
-      const data = await getToken(userName);
+      const data = await getToken(userName, languageCode);
       setRoomData(data);
       setIsConnecting(true);
       setIsReady(false);
@@ -50,7 +48,6 @@ export function VoiceAssistant() {
     console.error("Connection error:", error);
     setIsConnecting(false);
     setRoomData(null);
-    // Could show error toast here
   };
 
   const handleDisconnect = () => {
@@ -70,8 +67,6 @@ export function VoiceAssistant() {
     );
   }
 
-  // Show connecting view while pipeline initializes, or room view when ready
-  // Keep ConnectingView mounted to maintain the same LiveKitRoom connection
   if (roomData && (isConnecting || isReady)) {
     return (
       <ConnectingView
@@ -84,7 +79,5 @@ export function VoiceAssistant() {
     );
   }
 
-  // Show landing page
   return <LandingPage onConnect={handleConnect} />;
 }
-

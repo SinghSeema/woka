@@ -21,29 +21,29 @@ logger = get_logger(__name__)
 # Filler phrases organized by intent type
 FILLERS_BY_INTENT = {
     "general": [
-        "Let me check that for you...",
-        "One moment, let me look that up...",
-        "Sure, let me find that information...",
-        "Let me see what I can find...",
-        "Give me a second to check...",
+        "Give me a moment...",
+        "Sure, one second...",
+        "Let me think...",
+        "Hmm, give me just a sec...",
+        "Hold on a moment...",
     ],
     "date": [
-        "Let me look back at those dates...",
-        "Checking those dates for you...",
-        "Let me find sessions from that time...",
-        "Looking up sessions from that period...",
+        "Let me cast my mind back...",
+        "Hmm, let me think about that time...",
+        "Give me a moment, I'm going back through our sessions...",
+        "One sec, let me think back...",
     ],
     "topic": [
-        "Let me search for that topic...",
-        "Finding sessions about that...",
-        "Let me look for discussions on that...",
-        "Searching for that topic...",
+        "Hmm, let me think if we talked about that...",
+        "Give me a moment, I'm recalling our conversations...",
+        "Let me think back on that...",
+        "One second, casting my mind back...",
     ],
     "semantic": [
-        "Let me think about that...",
-        "Let me recall what we discussed...",
-        "Let me search my memory...",
-        "Let me find relevant information...",
+        "Hmm, let me think...",
+        "Give me a moment, I'm recalling what we discussed...",
+        "Let me cast my mind back...",
+        "One sec, I'm thinking...",
     ],
 }
 
