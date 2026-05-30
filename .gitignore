@@ -49,6 +49,9 @@ Thumbs.db
 livekit-certs/
 livekit.yaml
 
+# Local demo overrides (never deploy these)
+frontend/.env.local
+
 # Large binary files
 *.so
 *.dylib
